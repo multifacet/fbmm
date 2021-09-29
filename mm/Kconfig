@@ -2,6 +2,12 @@
 
 menu "Memory Management options"
 
+config FILE_ONLY_MEM
+	bool "File Only Memory"
+	depends on FS_DAX
+	help
+	  This option enables file only memory
+
 config SELECT_MEMORY_MODEL
 	def_bool y
 	depends on ARCH_SELECT_MEMORY_MODEL
