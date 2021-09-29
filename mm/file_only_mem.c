@@ -2,6 +2,7 @@
 #include <linux/file_only_mem.h>
 #include <linux/sysfs.h>
 #include <linux/kobject.h>
+#include <linux/namei.h>
 
 enum file_only_mem_state {
 	FOM_OFF = 0,
@@ -9,8 +10,9 @@ enum file_only_mem_state {
 	FOM_ALL = 2
 };
 
-enum file_only_mem_state fom_state = FOM_OFF;
-pid_t fom_proc = 0;
+static enum file_only_mem_state fom_state = FOM_OFF;
+static pid_t fom_proc = 0;
+char file_dir[256];
 
 bool use_file_only_mem(pid_t pid) {
 	if (fom_state == FOM_OFF) {
@@ -83,9 +85,48 @@ static ssize_t fom_pid_store(struct kobject *kobj,
 static struct kobj_attribute fom_pid_attribute =
 __ATTR(pid, 0644, fom_pid_show, fom_pid_store);
 
+static ssize_t fom_dir_show(struct kobject *kobj,
+		struct kobj_attribute *attr, char *buf)
+{
+	return sprintf(buf, "%s\n", file_dir);
+}
+
+static ssize_t fom_dir_store(struct kobject *kobj,
+		struct kobj_attribute *attr,
+		const char *buf, size_t count)
+{
+	struct path p;
+	int err;
+
+	if (count > sizeof(file_dir)) {
+		memset(file_dir, 0, sizeof(file_dir));
+		return -ENOMEM;
+	}
+
+	strncpy(file_dir, buf, sizeof(file_dir));
+
+	// echo likes to put an extra \n at the end of the string
+	// if it's there, remove it
+	if (file_dir[count - 1] == '\n')
+		file_dir[count - 1] = '\0';
+
+	// Check if the given path is actually a valid directory
+	err = kern_path(file_dir, LOOKUP_DIRECTORY, &p);
+
+	if (err) {
+		memset(file_dir, 0, sizeof(file_dir));
+		return err;
+	}
+
+	return count;
+}
+static struct kobj_attribute fom_file_dir_attribute =
+__ATTR(file_dir, 0644, fom_dir_show, fom_dir_store);
+
 static struct attribute *file_only_mem_attr[] = {
 	&fom_state_attribute.attr,
 	&fom_pid_attribute.attr,
+	&fom_file_dir_attribute.attr,
 	NULL,
 };
 
@@ -99,6 +140,8 @@ static int __init file_only_memory_init(void)
 {
 	struct kobject *fom_kobj;
 	int err;
+
+	memset(file_dir, 0, sizeof(file_dir));
 
 	fom_kobj = kobject_create_and_add("fom", mm_kobj);
 	if (unlikely(!fom_kobj)) {
