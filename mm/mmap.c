@@ -52,6 +52,7 @@
 #include <asm/cacheflush.h>
 #include <asm/tlb.h>
 #include <asm/mmu_context.h>
+#include <linux/file_only_mem.h>
 
 #define CREATE_TRACE_POINTS
 #include <trace/events/mmap.h>
@@ -1447,6 +1448,19 @@ unsigned long do_mmap(struct file *file, unsigned long addr,
 	/* Too many mappings? */
 	if (mm->map_count > sysctl_max_map_count)
 		return -ENOMEM;
+
+	// See if we want to use file only memory
+	if (!file && (flags & MAP_ANONYMOUS) && use_file_only_mem(current->tgid)) {
+		file = create_new_fom_file(len, prot);
+		flags = flags & ~MAP_ANONYMOUS;
+
+		// If the caller used MAP_PRIVATE, switch it to MAP_SHARED so that
+		// the system doesn't save the writes to anonymous memory
+		if (flags & MAP_PRIVATE) {
+			flags = flags & ~MAP_PRIVATE;
+			flags = flags | MAP_SHARED;
+		}
+	}
 
 	/* Obtain the address to map to. we verify (or select) it and ensure
 	 * that it represents a valid section of the address space.
