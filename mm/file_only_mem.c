@@ -3,6 +3,9 @@
 #include <linux/sysfs.h>
 #include <linux/kobject.h>
 #include <linux/namei.h>
+#include <linux/fs.h>
+#include <linux/mman.h>
+#include <linux/security.h>
 
 enum file_only_mem_state {
 	FOM_OFF = 0,
@@ -12,7 +15,7 @@ enum file_only_mem_state {
 
 static enum file_only_mem_state fom_state = FOM_OFF;
 static pid_t fom_proc = 0;
-char file_dir[256];
+static char file_dir[PATH_MAX];
 
 bool use_file_only_mem(pid_t pid) {
 	if (fom_state == FOM_OFF) {
@@ -25,6 +28,62 @@ bool use_file_only_mem(pid_t pid) {
 
 	// Should never reach here
 	return false;
+}
+
+// Most of this is taken from do_sys_truncate is fs/open.c
+static int truncate_fom_file(struct file *f, unsigned long len) {
+	struct inode *inode;
+	struct dentry *dentry;
+	int error;
+
+	dentry = f->f_path.dentry;
+	inode = dentry->d_inode;
+
+	sb_start_write(inode->i_sb);
+	error = locks_verify_truncate(inode, f, len);
+	if (!error)
+		error = security_path_truncate(&f->f_path);
+	if (!error)
+		error = do_truncate(file_mnt_user_ns(f), dentry, len,
+				    ATTR_MTIME | ATTR_CTIME, f);
+	sb_end_write(inode->i_sb);
+
+	return error;
+}
+
+struct file *create_new_fom_file(unsigned long len, unsigned long prot) {
+	struct file *f;
+	int open_flags = O_EXCL | O_TMPFILE;
+	umode_t open_mode = 0;
+	int ret = 0;
+
+	// Determine what flags to use for the call to open
+	if (prot & PROT_EXEC)
+		open_mode |= S_IXUSR;
+
+	if ((prot & (PROT_READ | PROT_WRITE)) == (PROT_READ | PROT_WRITE)) {
+		open_flags |= O_RDWR;
+		open_mode |= S_IRUSR | S_IWUSR;
+	} else if (prot & PROT_WRITE) {
+		open_flags |= O_WRONLY;
+		open_mode |= S_IWUSR;
+	} else if (prot & PROT_READ) {
+		// It doesn't make sense for anon memory to be read only,
+		return NULL;
+	}
+
+	f = filp_open(file_dir, open_flags, open_mode);
+	if (IS_ERR(f))
+		return NULL;
+
+	// Set the file to the correct size
+	ret = truncate_fom_file(f, len);
+	if (ret) {
+		filp_close(f, current->files);
+		return NULL;
+	}
+
+	return f;
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -98,12 +157,12 @@ static ssize_t fom_dir_store(struct kobject *kobj,
 	struct path p;
 	int err;
 
-	if (count > sizeof(file_dir)) {
-		memset(file_dir, 0, sizeof(file_dir));
+	if (count > PATH_MAX) {
+		memset(file_dir, 0, PATH_MAX);
 		return -ENOMEM;
 	}
 
-	strncpy(file_dir, buf, sizeof(file_dir));
+	strncpy(file_dir, buf, PATH_MAX);
 
 	// echo likes to put an extra \n at the end of the string
 	// if it's there, remove it
@@ -114,7 +173,7 @@ static ssize_t fom_dir_store(struct kobject *kobj,
 	err = kern_path(file_dir, LOOKUP_DIRECTORY, &p);
 
 	if (err) {
-		memset(file_dir, 0, sizeof(file_dir));
+		memset(file_dir, 0, PATH_MAX);
 		return err;
 	}
 
@@ -141,7 +200,7 @@ static int __init file_only_memory_init(void)
 	struct kobject *fom_kobj;
 	int err;
 
-	memset(file_dir, 0, sizeof(file_dir));
+	memset(file_dir, 0, PATH_MAX);
 
 	fom_kobj = kobject_create_and_add("fom", mm_kobj);
 	if (unlikely(!fom_kobj)) {
