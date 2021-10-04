@@ -110,7 +110,7 @@ static void insert_new_mapping(struct fom_proc *proc, struct fom_mapping *new_ma
 ///////////////////////////////////////////////////////////////////////////////
 // Helper functions
 
-// Most of this is taken from do_sys_truncate is fs/open.c
+// Most of this is taken from do_sys_truncate in fs/open.c
 static int truncate_fom_file(struct file *f, unsigned long len) {
 	struct inode *inode;
 	struct dentry *dentry;
@@ -131,6 +131,7 @@ static int truncate_fom_file(struct file *f, unsigned long len) {
 	return error;
 }
 
+// Most of this is taken from do_unlinkat in fs/namei.c
 static void delete_fom_file(struct file *f) {
 	struct vfsmount *mnt;
 	struct dentry *dentry;
