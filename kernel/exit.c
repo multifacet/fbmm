@@ -64,6 +64,7 @@
 #include <linux/rcuwait.h>
 #include <linux/compat.h>
 #include <linux/io_uring.h>
+#include <linux/file_only_mem.h>
 
 #include <linux/uaccess.h>
 #include <asm/unistd.h>
@@ -737,6 +738,11 @@ void __noreturn do_exit(long code)
 	 */
 
 	WARN_ON(blk_needs_flush_plug(tsk));
+
+	// Bijan: When a process exits, check if we should delete its FOM files
+	// We only care if the main thread exits, so check against tsk->pid
+	// instead of tsk->tgid
+	fom_check_exiting_proc(tsk->pid);
 
 	if (unlikely(in_interrupt()))
 		panic("Aiee, killing interrupt handler!");
