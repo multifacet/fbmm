@@ -6,6 +6,7 @@
 #include <linux/fs.h>
 #include <linux/mman.h>
 #include <linux/security.h>
+#include <linux/vmalloc.h>
 
 enum file_only_mem_state {
 	FOM_OFF = 0,
@@ -13,22 +14,101 @@ enum file_only_mem_state {
 	FOM_ALL = 2
 };
 
-static enum file_only_mem_state fom_state = FOM_OFF;
-static pid_t fom_proc = 0;
-static char file_dir[PATH_MAX];
+// Start is inclusive, end is exclusive
+struct fom_mapping {
+	u64 start;
+	u64 end;
+	struct file *file;
 
-bool use_file_only_mem(pid_t pid) {
-	if (fom_state == FOM_OFF) {
-		return false;
-	} if (fom_state == FOM_SINGLE_PROC) {
-		return pid == fom_proc;
-	} else if (fom_state == FOM_ALL) {
-		return true;
+	struct rb_node node;
+};
+
+struct fom_proc {
+	pid_t pid;
+	struct rb_root mappings;
+
+	struct rb_node node;
+};
+
+
+static enum file_only_mem_state fom_state = FOM_OFF;
+static pid_t cur_proc = 0;
+static char file_dir[PATH_MAX];
+static struct rb_root fom_procs = RB_ROOT;
+static DECLARE_RWSEM(fom_procs_sem);
+
+///////////////////////////////////////////////////////////////////////////////
+// struct fom_proc functions
+
+static struct fom_proc *get_fom_proc(pid_t pid) {
+	struct rb_node *node = fom_procs.rb_node;
+
+	while (node) {
+		struct fom_proc *proc = rb_entry(node, struct fom_proc, node);
+
+		if (pid < proc->pid)
+			node = node->rb_left;
+		else if (pid > proc->pid)
+			node = node->rb_right;
+		else
+			return proc;
 	}
 
-	// Should never reach here
-	return false;
+	return NULL;
 }
+
+static void insert_new_proc(struct fom_proc *new_proc) {
+	struct rb_node **new = &(fom_procs.rb_node);
+	struct rb_node *parent = NULL;
+
+	while (*new) {
+		struct fom_proc *cur = rb_entry(*new, struct fom_proc, node);
+
+		parent = *new;
+		if (new_proc->pid < cur->pid)
+			new = &((*new)->rb_left);
+		else if (new_proc->pid > cur->pid)
+			new = &((*new)->rb_right);
+		else {
+			pr_err("insert_new_proc: Attempting to insert already existing proc\n");
+			BUG();
+		}
+	}
+
+	rb_link_node(&new_proc->node, parent, new);
+	rb_insert_color(&new_proc->node, &fom_procs);
+}
+
+///////////////////////////////////////////////////////////////////////////////
+// struct fom_mapping functions
+
+static void insert_new_mapping(struct fom_proc *proc, struct fom_mapping *new_map) {
+	struct rb_node **new = &(proc->mappings.rb_node);
+	struct rb_node *parent = NULL;
+
+	while (*new) {
+		struct fom_mapping *cur = rb_entry(*new, struct fom_mapping, node);
+
+		// Check for an overlap
+		if ((new_map->start >= cur->start && new_map->start < cur->end) ||
+			(new_map->end > cur->start && new_map->end <= cur->end)) {
+			pr_err("insert_new_mapping: Attempting to insert overlapping mapping\n");
+			BUG();
+		}
+
+		parent = *new;
+		if (new_map->start < cur->start)
+			new = &((*new)->rb_left);
+		else
+			new = &((*new)->rb_right);
+	}
+
+	rb_link_node(&new_map->node, parent, new);
+	rb_insert_color(&new_map->node, &proc->mappings);
+}
+
+///////////////////////////////////////////////////////////////////////////////
+// Helper functions
 
 // Most of this is taken from do_sys_truncate is fs/open.c
 static int truncate_fom_file(struct file *f, unsigned long len) {
@@ -51,11 +131,80 @@ static int truncate_fom_file(struct file *f, unsigned long len) {
 	return error;
 }
 
-struct file *create_new_fom_file(unsigned long len, unsigned long prot) {
+static void delete_fom_file(struct file *f) {
+	struct vfsmount *mnt;
+	struct dentry *dentry;
+	struct dentry *parent;
+	int error;
+
+	filp_close(f, current->files);
+
+	mnt = f->f_path.mnt;
+	dentry = f->f_path.dentry;
+	parent = dentry->d_parent;
+
+	error = mnt_want_write(mnt);
+	if (error) {
+		pr_err("delete_fom_file: Can't delete file\n");
+		return;
+	}
+
+	inode_lock_nested(parent->d_inode, I_MUTEX_PARENT);
+
+	error = security_path_unlink(&f->f_path, dentry);
+	if (error)
+		goto err;
+
+	vfs_unlink(mnt_user_ns(mnt), parent->d_inode, dentry, NULL);
+
+err:
+	inode_unlock(parent->d_inode);
+	mnt_drop_write(mnt);
+}
+
+///////////////////////////////////////////////////////////////////////////////
+// External API functions
+
+bool use_file_only_mem(pid_t pid) {
+	if (fom_state == FOM_OFF) {
+		return false;
+	} if (fom_state == FOM_SINGLE_PROC) {
+		return pid == cur_proc;
+	} else if (fom_state == FOM_ALL) {
+		return true;
+	}
+
+	// Should never reach here
+	return false;
+}
+
+struct file *create_new_fom_file(unsigned long start, unsigned long len,
+		unsigned long prot, pid_t pid)
+{
+	struct fom_proc *proc;
+	struct fom_mapping *mapping = NULL;
 	struct file *f;
 	int open_flags = O_EXCL | O_TMPFILE;
-	umode_t open_mode = 0;
 	int ret = 0;
+	umode_t open_mode = 0;
+	bool new_proc = false;
+
+	down_read(&fom_procs_sem);
+	proc = get_fom_proc(pid);
+	up_read(&fom_procs_sem);
+	// Create the proc data structure if it does not already exist
+	if (!proc) {
+		new_proc = true;
+
+		proc = vmalloc(sizeof(struct fom_proc));
+		if (!proc) {
+			pr_err("create_new_fom_file: not enough memory for proc\n");
+			return NULL;
+		}
+
+		proc->pid = pid;
+		proc->mappings = RB_ROOT;
+	}
 
 	// Determine what flags to use for the call to open
 	if (prot & PROT_EXEC)
@@ -69,21 +218,78 @@ struct file *create_new_fom_file(unsigned long len, unsigned long prot) {
 		open_mode |= S_IWUSR;
 	} else if (prot & PROT_READ) {
 		// It doesn't make sense for anon memory to be read only,
-		return NULL;
+		goto err;
 	}
 
 	f = filp_open(file_dir, open_flags, open_mode);
 	if (IS_ERR(f))
-		return NULL;
+		goto err;
 
 	// Set the file to the correct size
 	ret = truncate_fom_file(f, len);
 	if (ret) {
-		filp_close(f, current->files);
-		return NULL;
+		delete_fom_file(f);
+		goto err;
 	}
 
+	// Create the new mapping
+	mapping = vmalloc(sizeof(struct fom_mapping));
+	if (!mapping) {
+		pr_err("create_new_fom_file: not enough memory for mapping\n");
+		goto err;
+	}
+	mapping->start = start;
+	mapping->end = start + len;
+	mapping->file = f;
+
+	down_write(&fom_procs_sem);
+	insert_new_mapping(proc, mapping);
+
+	// If we created a new fom_proc, add it to the rb_tree
+	if (new_proc)
+		insert_new_proc(proc);
+	up_write(&fom_procs_sem);
+
 	return f;
+
+err:
+	if (new_proc)
+		vfree(proc);
+	return NULL;
+}
+
+void fom_check_exiting_proc(pid_t pid) {
+	struct fom_proc *proc;
+	struct rb_node *node;
+
+	down_read(&fom_procs_sem);
+	proc = get_fom_proc(pid);
+	up_read(&fom_procs_sem);
+
+	if (!proc)
+		return;
+
+	down_write(&fom_procs_sem);
+
+	// First, free the mappings tree
+	node = proc->mappings.rb_node;
+	while (node) {
+		struct fom_mapping *map = rb_entry(node, struct fom_mapping, node);
+		rb_erase(node, &proc->mappings);
+		node = proc->mappings.rb_node;
+
+		delete_fom_file(map->file);
+
+		vfree(map);
+	}
+
+	// Now, remove the proc from the procs tree and free it
+	// TODO: I might be able to remove the proc from the proc tree first,
+	// then free everything else without holding any locks...
+	rb_erase(&proc->node, &fom_procs);
+	vfree(proc);
+
+	up_write(&fom_procs_sem);
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -120,7 +326,7 @@ __ATTR(state, 0644, fom_state_show, fom_state_store);
 static ssize_t fom_pid_show(struct kobject *kobj,
 		struct kobj_attribute *attr, char *buf)
 {
-	return sprintf(buf, "%d\n", fom_proc);
+	return sprintf(buf, "%d\n", cur_proc);
 }
 
 static ssize_t fom_pid_store(struct kobject *kobj,
@@ -133,11 +339,11 @@ static ssize_t fom_pid_store(struct kobject *kobj,
 	ret = kstrtoint(buf, 0, &pid);
 
 	if (ret != 0) {
-		fom_proc = 0;
+		cur_proc = 0;
 		return ret;
 	}
 
-	fom_proc = pid;
+	cur_proc = pid;
 
 	return count;
 }
