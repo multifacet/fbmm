@@ -1483,7 +1483,7 @@ unsigned long do_mmap(struct file *file, unsigned long addr,
 
 	// See if we want to use file only memory
 	if (!file && (flags & MAP_ANONYMOUS) && use_file_only_mem(current->tgid)) {
-		file = create_new_fom_file(addr, len, prot, current->tgid);
+		file = fom_create_new_file(addr, len, prot, current->tgid);
 
 		if (file) {
 			flags = flags & ~MAP_ANONYMOUS;
