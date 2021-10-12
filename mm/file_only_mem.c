@@ -179,7 +179,7 @@ bool use_file_only_mem(pid_t pid) {
 	return false;
 }
 
-struct file *create_new_fom_file(unsigned long start, unsigned long len,
+struct file *fom_create_new_file(unsigned long start, unsigned long len,
 		unsigned long prot, pid_t pid)
 {
 	struct fom_proc *proc;
@@ -199,7 +199,7 @@ struct file *create_new_fom_file(unsigned long start, unsigned long len,
 
 		proc = vmalloc(sizeof(struct fom_proc));
 		if (!proc) {
-			pr_err("create_new_fom_file: not enough memory for proc\n");
+			pr_err("fom_create_new_file: not enough memory for proc\n");
 			return NULL;
 		}
 
@@ -236,7 +236,7 @@ struct file *create_new_fom_file(unsigned long start, unsigned long len,
 	// Create the new mapping
 	mapping = vmalloc(sizeof(struct fom_mapping));
 	if (!mapping) {
-		pr_err("create_new_fom_file: not enough memory for mapping\n");
+		pr_err("fom_create_new_file: not enough memory for mapping\n");
 		goto err;
 	}
 	mapping->start = start;

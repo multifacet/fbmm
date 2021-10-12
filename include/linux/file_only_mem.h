@@ -8,7 +8,7 @@
 
 bool use_file_only_mem(pid_t pid);
 
-struct file *create_new_fom_file(unsigned long start, unsigned long len,
+struct file *fom_create_new_file(unsigned long start, unsigned long len,
 	unsigned long prot, pid_t pid);
 void fom_check_exiting_proc(pid_t pid);
 
@@ -18,7 +18,7 @@ inline bool use_file_only_mem(pid_t pid) {
 	return false;
 }
 
-inline struct file *create_new_fom_file(unsigned long start, unsigned long len,
+inline struct file *fom_create_new_file(unsigned long start, unsigned long len,
 	unsigned long prot, pid_t pid) {
 	return NULL;
 }
