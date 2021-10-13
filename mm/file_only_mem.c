@@ -7,6 +7,7 @@
 #include <linux/mman.h>
 #include <linux/security.h>
 #include <linux/vmalloc.h>
+#include <linux/falloc.h>
 
 enum file_only_mem_state {
 	FOM_OFF = 0,
@@ -14,11 +15,17 @@ enum file_only_mem_state {
 	FOM_ALL = 2
 };
 
+struct fom_file {
+	struct file *f;
+	unsigned long original_start; // Used to compute the offset for fallocate
+	int count;
+};
+
 // Start is inclusive, end is exclusive
 struct fom_mapping {
 	u64 start;
 	u64 end;
-	struct file *file;
+	struct fom_file *file;
 
 	struct rb_node node;
 };
@@ -107,6 +114,25 @@ static void insert_new_mapping(struct fom_proc *proc, struct fom_mapping *new_ma
 	rb_insert_color(&new_map->node, &proc->mappings);
 }
 
+// Returns the mapping in proc that contains addr or NULL if it does not exist
+static struct fom_mapping *find_mapping(struct fom_proc *proc, unsigned long addr) {
+	struct rb_node *node = proc->mappings.rb_node;
+
+	while (node) {
+		struct fom_mapping *mapping = rb_entry(node, struct fom_mapping, node);
+
+		if (mapping->start <= addr && addr < mapping->end) {
+			return mapping;
+		} else if (addr < mapping->start) {
+			node = node->rb_left;
+		} else {
+			node = node->rb_right;
+		}
+	}
+
+	return NULL;
+}
+
 ///////////////////////////////////////////////////////////////////////////////
 // Helper functions
 
@@ -163,6 +189,50 @@ err:
 	mnt_drop_write(mnt);
 }
 
+static void drop_fom_file(struct fom_mapping *map) {
+	map->file->count--;
+	if (map->file->count <= 0) {
+		delete_fom_file(map->file->f);
+		vfree(map->file);
+		map->file = NULL;
+	}
+}
+
+static struct file *open_new_file(unsigned long len, unsigned long prot) {
+	struct file *f;
+	int open_flags = O_EXCL | O_TMPFILE;
+	umode_t open_mode = 0;
+	int ret = 0;
+
+	// Determine what flags to use for the call to open
+	if (prot & PROT_EXEC)
+		open_mode |= S_IXUSR;
+
+	if ((prot & (PROT_READ | PROT_WRITE)) == (PROT_READ | PROT_WRITE)) {
+		open_flags |= O_RDWR;
+		open_mode |= S_IRUSR | S_IWUSR;
+	} else if (prot & PROT_WRITE) {
+		open_flags |= O_WRONLY;
+		open_mode |= S_IWUSR;
+	} else if (prot & PROT_READ) {
+		// It doesn't make sense for anon memory to be read only,
+		return NULL;
+	}
+
+	f = filp_open(file_dir, open_flags, open_mode);
+	if (IS_ERR(f))
+		return NULL;
+
+	// Set the file to the correct size
+	ret = truncate_fom_file(f, len);
+	if (ret) {
+		delete_fom_file(f);
+		return NULL;
+	}
+
+	return f;
+}
+
 ///////////////////////////////////////////////////////////////////////////////
 // External API functions
 
@@ -184,10 +254,7 @@ struct file *fom_create_new_file(unsigned long start, unsigned long len,
 {
 	struct fom_proc *proc;
 	struct fom_mapping *mapping = NULL;
-	struct file *f;
-	int open_flags = O_EXCL | O_TMPFILE;
-	int ret = 0;
-	umode_t open_mode = 0;
+	struct fom_file *file = NULL;
 	bool new_proc = false;
 
 	down_read(&fom_procs_sem);
@@ -207,31 +274,15 @@ struct file *fom_create_new_file(unsigned long start, unsigned long len,
 		proc->mappings = RB_ROOT;
 	}
 
-	// Determine what flags to use for the call to open
-	if (prot & PROT_EXEC)
-		open_mode |= S_IXUSR;
-
-	if ((prot & (PROT_READ | PROT_WRITE)) == (PROT_READ | PROT_WRITE)) {
-		open_flags |= O_RDWR;
-		open_mode |= S_IRUSR | S_IWUSR;
-	} else if (prot & PROT_WRITE) {
-		open_flags |= O_WRONLY;
-		open_mode |= S_IWUSR;
-	} else if (prot & PROT_READ) {
-		// It doesn't make sense for anon memory to be read only,
-		goto err;
-	}
-
-	f = filp_open(file_dir, open_flags, open_mode);
-	if (IS_ERR(f))
+	file = vmalloc(sizeof(struct fom_file));
+	if (!file)
 		goto err;
 
-	// Set the file to the correct size
-	ret = truncate_fom_file(f, len);
-	if (ret) {
-		delete_fom_file(f);
+	file->f = open_new_file(len, prot);
+	if (!file->f)
 		goto err;
-	}
+	file->count = 1;
+	file->original_start = start;
 
 	// Create the new mapping
 	mapping = vmalloc(sizeof(struct fom_mapping));
@@ -241,7 +292,7 @@ struct file *fom_create_new_file(unsigned long start, unsigned long len,
 	}
 	mapping->start = start;
 	mapping->end = start + len;
-	mapping->file = f;
+	mapping->file = file;
 
 	down_write(&fom_procs_sem);
 	insert_new_mapping(proc, mapping);
@@ -251,12 +302,121 @@ struct file *fom_create_new_file(unsigned long start, unsigned long len,
 		insert_new_proc(proc);
 	up_write(&fom_procs_sem);
 
-	return f;
+	return file->f;
 
 err:
 	if (new_proc)
 		vfree(proc);
+	if (file)
+		vfree(file);
 	return NULL;
+}
+
+int fom_munmap(pid_t pid, unsigned long start, unsigned long len) {
+	struct fom_proc *proc = NULL;
+	struct fom_mapping *old_mapping = NULL;
+	unsigned long end = start + len;
+	unsigned long falloc_offset, falloc_len;
+	struct file *falloc_file = NULL;
+	bool do_falloc = false;
+	int ret = 0;
+
+	down_read(&fom_procs_sem);
+	proc = get_fom_proc(pid);
+
+	if (!proc)
+		goto exit_locked;
+
+	old_mapping = find_mapping(proc, start);
+	if (!old_mapping)
+		goto exit_locked;
+	up_read(&fom_procs_sem);
+
+	// If the unmap range entirely contains the mapping, we can simply delete it
+	if (start <= old_mapping->start && old_mapping->end <= end) {
+		// First, we have to grab a write lock
+		down_write(&fom_procs_sem);
+
+		rb_erase(&old_mapping->node, &proc->mappings);
+		drop_fom_file(old_mapping);
+
+		// If old_mapping->file is null, it has been deleted.
+		// Otherwise, we should punch a hole in this mapping
+		if (old_mapping->file) {
+			falloc_offset = old_mapping->start - old_mapping->file->original_start;
+			falloc_len = old_mapping->end - old_mapping->start;
+			falloc_file = old_mapping->file->f;
+			do_falloc = true;
+		}
+
+		vfree(old_mapping);
+
+		up_write(&fom_procs_sem);
+	}
+	// If the unmap range takes only the end of the mapping, truncate the file
+	else if (start < old_mapping->end && old_mapping->end <= end) {
+		down_write(&fom_procs_sem);
+
+		falloc_offset = start - old_mapping->file->original_start;
+		falloc_len = old_mapping->end - start;
+		old_mapping->end = start;
+		falloc_file = old_mapping->file->f;
+		do_falloc = true;
+
+		up_write(&fom_procs_sem);
+	}
+	// If the unmap range trims off only the beginning of the mapping,
+	// deallocate the beginning
+	else if (start <= old_mapping->start && old_mapping->start < end) {
+		down_write(&fom_procs_sem);
+
+		falloc_offset = old_mapping->start - old_mapping->file->original_start;
+		falloc_len = end - old_mapping->start;
+		old_mapping->start = end;
+		falloc_file = old_mapping->file->f;
+		do_falloc = true;
+
+		up_write(&fom_procs_sem);
+	}
+	// If the unmap range is entirely within a mapping, poke a hole
+	// in the middle of the file and create a new mapping to represent
+	// the split
+	else if (old_mapping->start < start && end < old_mapping->end) {
+		struct fom_mapping *new_mapping = vmalloc(sizeof(struct fom_mapping));
+
+		if (!new_mapping) {
+			pr_err("fom_munmap: can't allocate new fom_mapping\n");
+			return -ENOMEM;
+		}
+
+		new_mapping->start = end;
+		new_mapping->end = old_mapping->end;
+
+		down_write(&fom_procs_sem);
+		old_mapping->end = start;
+
+		new_mapping->file = old_mapping->file;
+		new_mapping->file->count++;
+
+		insert_new_mapping(proc, new_mapping);
+
+		falloc_offset = start - old_mapping->file->original_start;
+		falloc_len = end - start;
+		falloc_file = old_mapping->file->f;
+		do_falloc = true;
+		up_write(&fom_procs_sem);
+	}
+
+	if (do_falloc) {
+		ret = vfs_fallocate(falloc_file,
+				FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE,
+				falloc_offset, falloc_len);
+	}
+
+	return ret;
+exit_locked:
+	up_read(&fom_procs_sem);
+	return ret;
 }
 
 void fom_check_exiting_proc(pid_t pid) {
@@ -279,7 +439,7 @@ void fom_check_exiting_proc(pid_t pid) {
 		rb_erase(node, &proc->mappings);
 		node = proc->mappings.rb_node;
 
-		delete_fom_file(map->file);
+		drop_fom_file(map);
 
 		vfree(map);
 	}

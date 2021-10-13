@@ -2851,6 +2851,8 @@ int __do_munmap(struct mm_struct *mm, unsigned long start, size_t len,
 	if (len == 0)
 		return -EINVAL;
 
+	fom_munmap(current->tgid, start, len);
+
 	/*
 	 * arch_unmap() might do unmaps itself.  It must be called
 	 * and finish any rbtree manipulation before this code
