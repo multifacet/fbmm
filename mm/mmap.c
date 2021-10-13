@@ -2508,6 +2508,8 @@ int do_mas_munmap(struct ma_state *mas, struct mm_struct *mm,
 	if (end == start)
 		return -EINVAL;
 
+	fom_munmap(current->tgid, start, len);
+
 	 /* arch_unmap() might do unmaps itself.  */
 	arch_unmap(mm, start, end);
 
