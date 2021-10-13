@@ -2964,8 +2964,6 @@ extern int ext4_can_truncate(struct inode *inode);
 extern int ext4_truncate(struct inode *);
 extern int ext4_break_layouts(struct inode *);
 extern int ext4_punch_hole(struct inode *inode, loff_t offset, loff_t length);
-extern int ext4_punch_hole_impl(handle_t *handle, struct inode *inode, loff_t offset,
-			  loff_t length, int relink);
 extern void ext4_set_inode_flags(struct inode *, bool init);
 extern int ext4_alloc_da_blocks(struct inode *inode);
 extern void ext4_set_aops(struct inode *inode);
@@ -3664,8 +3662,6 @@ extern void ext4_ext_init(struct super_block *);
 extern void ext4_ext_release(struct super_block *);
 extern long ext4_fallocate(struct file *file, int mode, loff_t offset,
 			  loff_t len);
-extern long ext4_fallocate_impl(handle_t *handle, struct file *file, int mode,
-			  loff_t offset, loff_t len, int relink);
 extern int ext4_convert_unwritten_extents(handle_t *handle, struct inode *inode,
 					  loff_t offset, ssize_t len);
 extern int ext4_convert_unwritten_io_end_vec(handle_t *handle,
@@ -3694,10 +3690,6 @@ extern int ext4_swap_extents(handle_t *handle, struct inode *inode1,
 				struct inode *inode2, ext4_lblk_t lblk1,
 			     ext4_lblk_t lblk2,  ext4_lblk_t count,
 			     int mark_unwritten,int *err);
-extern int ext4_meta_swap_extents(handle_t *handle, struct inode *inode1,
-				struct inode *inode2, ext4_lblk_t lblk1,
-				ext4_lblk_t lblk2, ext4_lblk_t count,
-				int *err);
 extern int ext4_clu_mapped(struct inode *inode, ext4_lblk_t lclu);
 extern int ext4_datasem_ensure_credits(handle_t *handle, struct inode *inode,
 				       int check_cred, int restart_cred,
@@ -3717,9 +3709,6 @@ extern void ext4_double_up_write_data_sem(struct inode *orig_inode,
 extern int ext4_move_extents(struct file *o_filp, struct file *d_filp,
 			     __u64 start_orig, __u64 start_donor,
 			     __u64 len, __u64 *moved_len);
-extern long ext4_dynamic_remap(struct file *file1, struct file *file2,
-			       loff_t offset1, loff_t offset2,
-			       loff_t count);
 
 /* page-io.c */
 extern int __init ext4_init_pageio(void);

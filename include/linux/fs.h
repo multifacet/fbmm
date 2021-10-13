@@ -2049,9 +2049,6 @@ struct file_operations {
 	int (*setlease)(struct file *, long, struct file_lock **, void **);
 	long (*fallocate)(struct file *file, int mode, loff_t offset,
 			  loff_t len);
-	long (*dynamic_remap)(struct file *file1, struct file *file2,
-			      loff_t offset1, loff_t offset2,
-			      loff_t count);
 	void (*show_fdinfo)(struct seq_file *m, struct file *f);
 #ifndef CONFIG_MMU
 	unsigned (*mmap_capabilities)(struct file *);
@@ -2767,10 +2764,6 @@ int do_truncate(struct user_namespace *, struct dentry *, loff_t start,
 		unsigned int time_attrs, struct file *filp);
 extern int vfs_fallocate(struct file *file, int mode, loff_t offset,
 			loff_t len);
-extern long vfs_dynamic_remap(struct file *file1, struct file *file2,
-			loff_t offset1, loff_t offset2,
-			const char __user *start_addr,
-			loff_t count);
 extern long do_sys_open(int dfd, const char __user *filename, int flags,
 			umode_t mode);
 extern struct file *file_open_name(struct filename *, int, umode_t);
