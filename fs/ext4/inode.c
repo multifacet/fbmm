@@ -4065,7 +4065,7 @@ int ext4_break_layouts(struct inode *inode)
  * Returns: 0 on success or negative on failure
  */
 
-int ext4_punch_hole_impl(struct file *file, loff_t offset, loff_t length, int relink)
+int ext4_punch_hole(struct file *file, loff_t offset, loff_t length)
 {
 	struct inode *inode = file_inode(file);
 	struct super_block *sb = inode->i_sb;
@@ -4083,17 +4083,14 @@ int ext4_punch_hole_impl(struct file *file, loff_t offset, loff_t length, int re
 	 * Write out all dirty pages to avoid race conditions
 	 * Then release them.
 	 */
-	if (!relink) {
-		if (mapping_tagged(mapping, PAGECACHE_TAG_DIRTY)) {
-			ret = filemap_write_and_wait_range(mapping, offset,
-							   offset + length - 1);
-			if (ret)
-				return ret;
-		}
+	if (mapping_tagged(mapping, PAGECACHE_TAG_DIRTY)) {
+		ret = filemap_write_and_wait_range(mapping, offset,
+						   offset + length - 1);
+		if (ret)
+			return ret;
 	}
 
-	if (!relink)
-		inode_lock(inode);
+	inode_lock(inode);
 
 	/* No need to punch hole beyond i_size */
 	if (offset >= inode->i_size)
@@ -4154,28 +4151,19 @@ int ext4_punch_hole_impl(struct file *file, loff_t offset, loff_t length, int re
 		ret = ext4_update_disksize_before_punch(inode, offset, length);
 		if (ret)
 			goto out_dio;
-
-		if (!relink) {
-			truncate_pagecache_range(inode, first_block_offset,
-						 last_block_offset);
-		}
+		truncate_pagecache_range(inode, first_block_offset,
+					 last_block_offset);
 	}
 
 	if (ext4_test_inode_flag(inode, EXT4_INODE_EXTENTS))
 		credits = ext4_writepage_trans_blocks(inode);
 	else
 		credits = ext4_blocks_for_truncate(inode);
-
-	if (relink) {
-		if (ext4_journal_extend(handle, credits, 0) != 0)
-			return -ENOSPC;
-	} else {
-		handle = ext4_journal_start(inode, EXT4_HT_TRUNCATE, credits);
-		if (IS_ERR(handle)) {
-			ret = PTR_ERR(handle);
-			ext4_std_error(sb, ret);
-			goto out_dio;
-		}
+	handle = ext4_journal_start(inode, EXT4_HT_TRUNCATE, credits);
+	if (IS_ERR(handle)) {
+		ret = PTR_ERR(handle);
+		ext4_std_error(sb, ret);
+		goto out_dio;
 	}
 
 	ret = ext4_zero_partial_blocks(handle, inode, offset,
@@ -4190,15 +4178,13 @@ int ext4_punch_hole_impl(struct file *file, loff_t offset, loff_t length, int re
 	/* If there are blocks to remove, do it */
 	if (stop_block > first_block) {
 
-		if (!relink)
-			down_write(&EXT4_I(inode)->i_data_sem);
+		down_write(&EXT4_I(inode)->i_data_sem);
 		ext4_discard_preallocations(inode, 0);
 
 		ret = ext4_es_remove_extent(inode, first_block,
 					    stop_block - first_block);
 		if (ret) {
-			if (!relink)
-				up_write(&EXT4_I(inode)->i_data_sem);
+			up_write(&EXT4_I(inode)->i_data_sem);
 			goto out_stop;
 		}
 
@@ -4208,8 +4194,8 @@ int ext4_punch_hole_impl(struct file *file, loff_t offset, loff_t length, int re
 		else
 			ret = ext4_ind_remove_space(handle, inode, first_block,
 						    stop_block);
-		if (!relink)
-			up_write(&EXT4_I(inode)->i_data_sem);
+
+		up_write(&EXT4_I(inode)->i_data_sem);
 	}
 	ext4_fc_track_range(handle, inode, first_block, stop_block);
 	if (IS_SYNC(inode))
@@ -4222,18 +4208,12 @@ int ext4_punch_hole_impl(struct file *file, loff_t offset, loff_t length, int re
 	if (ret >= 0)
 		ext4_update_inode_fsync_trans(handle, inode, 1);
 out_stop:
-	if (!relink)
-		ext4_journal_stop(handle);
+	ext4_journal_stop(handle);
 out_dio:
 	filemap_invalidate_unlock(mapping);
 out_mutex:
-	if (!relink)
-		inode_unlock(inode);
+	inode_unlock(inode);
 	return ret;
-}
-
-int ext4_punch_hole(struct file *file, loff_t offset, loff_t length) {
-	return ext4_punch_hole_impl(file, offset, length, 0);
 }
 
 int ext4_inode_attach_jinode(struct inode *inode)
