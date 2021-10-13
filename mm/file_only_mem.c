@@ -114,23 +114,26 @@ static void insert_new_mapping(struct fom_proc *proc, struct fom_mapping *new_ma
 	rb_insert_color(&new_map->node, &proc->mappings);
 }
 
-// Returns the mapping in proc that contains addr or NULL if it does not exist
+// Returns the first mapping in proc where addr < mapping->end, NULL if none exists.
+// Mostly taken from find_vma
 static struct fom_mapping *find_mapping(struct fom_proc *proc, unsigned long addr) {
+	struct fom_mapping *mapping = NULL;
 	struct rb_node *node = proc->mappings.rb_node;
 
 	while (node) {
-		struct fom_mapping *mapping = rb_entry(node, struct fom_mapping, node);
+		struct fom_mapping *tmp = rb_entry(node, struct fom_mapping, node);
 
-		if (mapping->start <= addr && addr < mapping->end) {
-			return mapping;
-		} else if (addr < mapping->start) {
+		if (tmp->end > addr) {
+			mapping = tmp;
+			if (tmp->start <= addr)
+				break;
 			node = node->rb_left;
 		} else {
 			node = node->rb_right;
 		}
 	}
 
-	return NULL;
+	return mapping;
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -323,94 +326,109 @@ int fom_munmap(pid_t pid, unsigned long start, unsigned long len) {
 
 	down_read(&fom_procs_sem);
 	proc = get_fom_proc(pid);
-
-	if (!proc)
-		goto exit_locked;
-
-	old_mapping = find_mapping(proc, start);
-	if (!old_mapping)
-		goto exit_locked;
 	up_read(&fom_procs_sem);
 
-	// If the unmap range entirely contains the mapping, we can simply delete it
-	if (start <= old_mapping->start && old_mapping->end <= end) {
-		// First, we have to grab a write lock
-		down_write(&fom_procs_sem);
+	if (!proc)
+		return 0;
 
-		rb_erase(&old_mapping->node, &proc->mappings);
-		drop_fom_file(old_mapping);
+	// a munmap call can span multiple memory ranges, so we might have to do this
+	// multiple times
+	while (start < end) {
+		unsigned long next_start;
 
-		// If old_mapping->file is null, it has been deleted.
-		// Otherwise, we should punch a hole in this mapping
-		if (old_mapping->file) {
-			falloc_offset = old_mapping->start - old_mapping->file->original_start;
-			falloc_len = old_mapping->end - old_mapping->start;
+		// Finds the first mapping where start < mapping->end, so we have to
+		// check if old_mapping is actually within the range
+		down_read(&fom_procs_sem);
+		old_mapping = find_mapping(proc, start);
+		if (!old_mapping || end <= old_mapping->start)
+			goto exit_locked;
+
+		next_start = old_mapping->end;
+		up_read(&fom_procs_sem);
+
+		// If the unmap range entirely contains the mapping, we can simply delete it
+		if (start <= old_mapping->start && old_mapping->end <= end) {
+			// First, we have to grab a write lock
+			down_write(&fom_procs_sem);
+
+			rb_erase(&old_mapping->node, &proc->mappings);
+			drop_fom_file(old_mapping);
+
+			// If old_mapping->file is null, it has been deleted.
+			// Otherwise, we should punch a hole in this mapping
+			if (old_mapping->file) {
+				falloc_offset =
+					old_mapping->start - old_mapping->file->original_start;
+				falloc_len = old_mapping->end - old_mapping->start;
+				falloc_file = old_mapping->file->f;
+				do_falloc = true;
+			}
+
+			vfree(old_mapping);
+
+			up_write(&fom_procs_sem);
+		}
+		// If the unmap range takes only the end of the mapping, truncate the file
+		else if (start < old_mapping->end && old_mapping->end <= end) {
+			down_write(&fom_procs_sem);
+
+			falloc_offset = start - old_mapping->file->original_start;
+			falloc_len = old_mapping->end - start;
+			old_mapping->end = start;
 			falloc_file = old_mapping->file->f;
 			do_falloc = true;
+
+			up_write(&fom_procs_sem);
+		}
+		// If the unmap range trims off only the beginning of the mapping,
+		// deallocate the beginning
+		else if (start <= old_mapping->start && old_mapping->start < end) {
+			down_write(&fom_procs_sem);
+
+			falloc_offset = old_mapping->start - old_mapping->file->original_start;
+			falloc_len = end - old_mapping->start;
+			old_mapping->start = end;
+			falloc_file = old_mapping->file->f;
+			do_falloc = true;
+
+			up_write(&fom_procs_sem);
+		}
+		// If the unmap range is entirely within a mapping, poke a hole
+		// in the middle of the file and create a new mapping to represent
+		// the split
+		else if (old_mapping->start < start && end < old_mapping->end) {
+			struct fom_mapping *new_mapping = vmalloc(sizeof(struct fom_mapping));
+
+			if (!new_mapping) {
+				pr_err("fom_munmap: can't allocate new fom_mapping\n");
+				return -ENOMEM;
+			}
+
+			new_mapping->start = end;
+			new_mapping->end = old_mapping->end;
+
+			down_write(&fom_procs_sem);
+			old_mapping->end = start;
+
+			new_mapping->file = old_mapping->file;
+			new_mapping->file->count++;
+
+			insert_new_mapping(proc, new_mapping);
+
+			falloc_offset = start - old_mapping->file->original_start;
+			falloc_len = end - start;
+			falloc_file = old_mapping->file->f;
+			do_falloc = true;
+			up_write(&fom_procs_sem);
 		}
 
-		vfree(old_mapping);
-
-		up_write(&fom_procs_sem);
-	}
-	// If the unmap range takes only the end of the mapping, truncate the file
-	else if (start < old_mapping->end && old_mapping->end <= end) {
-		down_write(&fom_procs_sem);
-
-		falloc_offset = start - old_mapping->file->original_start;
-		falloc_len = old_mapping->end - start;
-		old_mapping->end = start;
-		falloc_file = old_mapping->file->f;
-		do_falloc = true;
-
-		up_write(&fom_procs_sem);
-	}
-	// If the unmap range trims off only the beginning of the mapping,
-	// deallocate the beginning
-	else if (start <= old_mapping->start && old_mapping->start < end) {
-		down_write(&fom_procs_sem);
-
-		falloc_offset = old_mapping->start - old_mapping->file->original_start;
-		falloc_len = end - old_mapping->start;
-		old_mapping->start = end;
-		falloc_file = old_mapping->file->f;
-		do_falloc = true;
-
-		up_write(&fom_procs_sem);
-	}
-	// If the unmap range is entirely within a mapping, poke a hole
-	// in the middle of the file and create a new mapping to represent
-	// the split
-	else if (old_mapping->start < start && end < old_mapping->end) {
-		struct fom_mapping *new_mapping = vmalloc(sizeof(struct fom_mapping));
-
-		if (!new_mapping) {
-			pr_err("fom_munmap: can't allocate new fom_mapping\n");
-			return -ENOMEM;
+		if (do_falloc) {
+			ret = vfs_fallocate(falloc_file,
+					FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE,
+					falloc_offset, falloc_len);
 		}
 
-		new_mapping->start = end;
-		new_mapping->end = old_mapping->end;
-
-		down_write(&fom_procs_sem);
-		old_mapping->end = start;
-
-		new_mapping->file = old_mapping->file;
-		new_mapping->file->count++;
-
-		insert_new_mapping(proc, new_mapping);
-
-		falloc_offset = start - old_mapping->file->original_start;
-		falloc_len = end - start;
-		falloc_file = old_mapping->file->f;
-		do_falloc = true;
-		up_write(&fom_procs_sem);
-	}
-
-	if (do_falloc) {
-		ret = vfs_fallocate(falloc_file,
-				FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE,
-				falloc_offset, falloc_len);
+		start = next_start;
 	}
 
 	return ret;
