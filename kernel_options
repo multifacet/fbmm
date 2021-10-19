@@ -1,3 +1,6 @@
+To enable File Only Memory:
+CONFIG_FILE_ONLY_MEM
+
 To Disable Meltdown Mitigation:
 CONFIG_PAGE_TABLE_ISOLATION=n
 CONFIG_RETPOLINE=n
@@ -46,3 +49,4 @@ CONFIG_VIRTIO_NET=y
 CONFIG_ISO9660_FS=m
 CONFIG_EXT4_FS=y
 
+j machine setup --class c6420-exp -f /tmp/machines --  "setup00000 {MACHINE} bijan --centos7 --clone_wkspc --firewall --host_bmks --host_dep --resize_root --swap sdb --secret {TOKEN} --spec_2017 /p/multifacet/infrastructure/spec2017.iso --spec_xz_input /p/scail/users/bijan/xz_input.tar.xz" "setup00003 {MACHINE} bijan dev --https https://github.com/BijanT/linux-file-only-mem --username BijanT --secret {TOKEN} +CONFIG_TRANSPARENT_HUGEPAGE +CONFIG_MM_ECON -CONFIG_PAGE_TABLE_ISOLATION -CONFIG_RETPOLINE +CONFIG_GDB_SCRIPTS +CONFIG_FRAME_POINTERS +CONFIG_IKHEADERS +CONFIG_SLAB_FREELIST_RANDOM +CONFIG_SHUFFLE_PAGE_ALLOCATOR +CONFIG_FS_DAX +CONFIG_DAX +CONFIG_BLK_DEV_RAM +CONFIG_FILE_ONLY_MEM"
