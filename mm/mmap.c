@@ -1315,6 +1315,9 @@ unsigned long do_mmap(struct file *file, unsigned long addr,
 		return -EAGAIN;
 
 	// See if we want to use file only memory
+//	if (use_file_only_mem(current->tgid)) {
+//		pr_err("%lx %lx %lx %p\n", addr, addr + len, flags & MAP_ANONYMOUS, file);
+//	}
 	if (!file && (flags & MAP_ANONYMOUS) && use_file_only_mem(current->tgid)) {
 		file = fom_create_new_file(addr, len, prot, current->tgid);
 
@@ -2299,6 +2302,9 @@ static inline int munmap_sidetree(struct vm_area_struct *vma,
 
 	if (vma->vm_flags & VM_LOCKED)
 		vma->vm_mm->locked_vm -= vma_pages(vma);
+//	if (use_file_only_mem(current->tgid)) {
+//		pr_err("a %lx %lx\n", start, end);
+//	}
 
 	return 0;
 }
@@ -2464,6 +2470,7 @@ do_mas_align_munmap(struct ma_state *mas, struct vm_area_struct *vma,
 	remove_mt(mm, &mas_detach);
 	__mt_destroy(&mt_detach);
 
+	fom_munmap(current->tgid, start, end - start);
 
 	validate_mm(mm);
 	return downgrade ? 1 : 0;
@@ -2507,8 +2514,6 @@ int do_mas_munmap(struct ma_state *mas, struct mm_struct *mm,
 	end = start + PAGE_ALIGN(len);
 	if (end == start)
 		return -EINVAL;
-
-	fom_munmap(current->tgid, start, len);
 
 	 /* arch_unmap() might do unmaps itself.  */
 	arch_unmap(mm, start, end);

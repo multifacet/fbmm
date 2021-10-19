@@ -40,6 +40,7 @@ struct fom_proc {
 
 static enum file_only_mem_state fom_state = FOM_OFF;
 static pid_t cur_proc = 0;
+static int fom_count = 0;
 static char file_dir[PATH_MAX];
 static struct rb_root fom_procs = RB_ROOT;
 static DECLARE_RWSEM(fom_procs_sem);
@@ -193,6 +194,7 @@ err:
 }
 
 static void drop_fom_file(struct fom_mapping *map) {
+//	pr_err("count: %d %llx %llx\n", map->file->count, map->start, map->end);
 	map->file->count--;
 	if (map->file->count <= 0) {
 		delete_fom_file(map->file->f);
@@ -260,6 +262,11 @@ struct file *fom_create_new_file(unsigned long start, unsigned long len,
 	struct fom_file *file = NULL;
 	bool new_proc = false;
 
+	// Workaround for this causing a crash in the dynamic linker
+	fom_count++;
+	if (fom_count <= 2)
+		return NULL;
+
 	down_read(&fom_procs_sem);
 	proc = get_fom_proc(pid);
 	up_read(&fom_procs_sem);
@@ -298,6 +305,7 @@ struct file *fom_create_new_file(unsigned long start, unsigned long len,
 	mapping->file = file;
 
 	down_write(&fom_procs_sem);
+
 	insert_new_mapping(proc, mapping);
 
 	// If we created a new fom_proc, add it to the rb_tree
@@ -447,6 +455,8 @@ void fom_check_exiting_proc(pid_t pid) {
 
 	if (!proc)
 		return;
+
+	fom_count = 0;
 
 	down_write(&fom_procs_sem);
 
