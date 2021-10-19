@@ -1482,6 +1482,9 @@ unsigned long do_mmap(struct file *file, unsigned long addr,
 		return -EAGAIN;
 
 	// See if we want to use file only memory
+//	if (use_file_only_mem(current->tgid)) {
+//		pr_err("%lx %lx %lx %p\n", addr, addr + len, flags & MAP_ANONYMOUS, file);
+//	}
 	if (!file && (flags & MAP_ANONYMOUS) && use_file_only_mem(current->tgid)) {
 		file = fom_create_new_file(addr, len, prot, current->tgid);
 
@@ -2851,7 +2854,9 @@ int __do_munmap(struct mm_struct *mm, unsigned long start, size_t len,
 	if (len == 0)
 		return -EINVAL;
 
-	fom_munmap(current->tgid, start, len);
+//	if (use_file_only_mem(current->tgid)) {
+//		pr_err("a %lx %lx\n", start, end);
+//	}
 
 	/*
 	 * arch_unmap() might do unmaps itself.  It must be called
@@ -2929,8 +2934,13 @@ int __do_munmap(struct mm_struct *mm, unsigned long start, size_t len,
 
 	unmap_region(mm, vma, prev, start, end);
 
+	fom_munmap(current->tgid, start, len);
+
 	/* Fix up all other VM information */
 	remove_vma_list(mm, vma);
+//	if (use_file_only_mem(current->tgid)) {
+//		pr_err("b %lx %lx\n", start, end);
+//	}
 
 	return downgrade ? 1 : 0;
 }
