@@ -1413,6 +1413,7 @@ unsigned long do_mmap(struct file *file, unsigned long addr,
 	struct mm_struct *mm = current->mm;
 	vm_flags_t vm_flags;
 	int pkey = 0;
+	bool created_fom_file = false;
 
 	*populate = 0;
 
@@ -1482,13 +1483,11 @@ unsigned long do_mmap(struct file *file, unsigned long addr,
 		return -EAGAIN;
 
 	// See if we want to use file only memory
-//	if (use_file_only_mem(current->tgid)) {
-//		pr_err("%lx %lx %lx %p\n", addr, addr + len, flags & MAP_ANONYMOUS, file);
-//	}
 	if (!file && (flags & MAP_ANONYMOUS) && use_file_only_mem(current->tgid)) {
-		file = fom_create_new_file(addr, len, prot, current->tgid);
+		file = fom_create_new_file(len, prot);
 
 		if (file) {
+			created_fom_file = true;
 			flags = flags & ~MAP_ANONYMOUS;
 
 			// If the caller used MAP_PRIVATE, switch it to MAP_SHARED so that
@@ -1606,6 +1605,14 @@ unsigned long do_mmap(struct file *file, unsigned long addr,
 	    ((vm_flags & VM_LOCKED) ||
 	     (flags & (MAP_POPULATE | MAP_NONBLOCK)) == MAP_POPULATE))
 		*populate = len;
+
+	// Because mmap_region will unmap regions that overlap with the new region,
+	// we must wait to register the new fom file until after it is finished.
+	// This is to prevent a fom file from being registered and then an overlapping
+	// region is unmapped, making the fom system think it needs to delete the new file
+	if (created_fom_file) {
+		fom_register_file(current->tgid, file, addr, len);
+	}
 	return addr;
 }
 
@@ -2854,10 +2861,6 @@ int __do_munmap(struct mm_struct *mm, unsigned long start, size_t len,
 	if (len == 0)
 		return -EINVAL;
 
-//	if (use_file_only_mem(current->tgid)) {
-//		pr_err("a %lx %lx\n", start, end);
-//	}
-
 	/*
 	 * arch_unmap() might do unmaps itself.  It must be called
 	 * and finish any rbtree manipulation before this code
@@ -2938,10 +2941,6 @@ int __do_munmap(struct mm_struct *mm, unsigned long start, size_t len,
 
 	/* Fix up all other VM information */
 	remove_vma_list(mm, vma);
-//	if (use_file_only_mem(current->tgid)) {
-//		pr_err("b %lx %lx\n", start, end);
-//	}
-
 	return downgrade ? 1 : 0;
 }
 

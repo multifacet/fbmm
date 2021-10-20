@@ -8,8 +8,9 @@
 
 bool use_file_only_mem(pid_t pid);
 
-struct file *fom_create_new_file(unsigned long start, unsigned long len,
-	unsigned long prot, pid_t pid);
+struct file *fom_create_new_file(unsigned long len,	unsigned long prot);
+void fom_register_file(pid_t pid, struct file *f, unsigned long start,
+		unsigned long len);
 int fom_munmap(pid_t pid, unsigned long start, unsigned long len);
 void fom_check_exiting_proc(pid_t pid);
 
@@ -19,10 +20,13 @@ inline bool use_file_only_mem(pid_t pid) {
 	return false;
 }
 
-inline struct file *fom_create_new_file(unsigned long start, unsigned long len,
-	unsigned long prot, pid_t pid) {
+inline struct file *fom_create_new_file(unsigned long len, unsigned long prot) {
 	return NULL;
 }
+
+inline void fom_register_file(pid_t pid, struct file *f, unsigned long start,
+		unsigned long len)
+{}
 
 inline int fom_munmap(pid_t pid, unsigned long start, unsigned long len) {
 	return 0;
