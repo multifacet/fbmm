@@ -40,7 +40,6 @@ struct fom_proc {
 
 static enum file_only_mem_state fom_state = FOM_OFF;
 static pid_t cur_proc = 0;
-static int fom_count = 0;
 static char file_dir[PATH_MAX];
 static struct rb_root fom_procs = RB_ROOT;
 static DECLARE_RWSEM(fom_procs_sem);
@@ -194,7 +193,6 @@ err:
 }
 
 static void drop_fom_file(struct fom_mapping *map) {
-//	pr_err("count: %d %llx %llx\n", map->file->count, map->start, map->end);
 	map->file->count--;
 	if (map->file->count <= 0) {
 		delete_fom_file(map->file->f);
@@ -203,7 +201,23 @@ static void drop_fom_file(struct fom_mapping *map) {
 	}
 }
 
-static struct file *open_new_file(unsigned long len, unsigned long prot) {
+///////////////////////////////////////////////////////////////////////////////
+// External API functions
+
+bool use_file_only_mem(pid_t pid) {
+	if (fom_state == FOM_OFF) {
+		return false;
+	} if (fom_state == FOM_SINGLE_PROC) {
+		return pid == cur_proc;
+	} else if (fom_state == FOM_ALL) {
+		return true;
+	}
+
+	// Should never reach here
+	return false;
+}
+
+struct file *fom_create_new_file(unsigned long len, unsigned long prot) {
 	struct file *f;
 	int open_flags = O_EXCL | O_TMPFILE;
 	umode_t open_mode = 0;
@@ -238,34 +252,13 @@ static struct file *open_new_file(unsigned long len, unsigned long prot) {
 	return f;
 }
 
-///////////////////////////////////////////////////////////////////////////////
-// External API functions
-
-bool use_file_only_mem(pid_t pid) {
-	if (fom_state == FOM_OFF) {
-		return false;
-	} if (fom_state == FOM_SINGLE_PROC) {
-		return pid == cur_proc;
-	} else if (fom_state == FOM_ALL) {
-		return true;
-	}
-
-	// Should never reach here
-	return false;
-}
-
-struct file *fom_create_new_file(unsigned long start, unsigned long len,
-		unsigned long prot, pid_t pid)
+void fom_register_file(pid_t pid, struct file *f,
+		unsigned long start, unsigned long len)
 {
 	struct fom_proc *proc;
 	struct fom_mapping *mapping = NULL;
 	struct fom_file *file = NULL;
 	bool new_proc = false;
-
-	// Workaround for this causing a crash in the dynamic linker
-	fom_count++;
-	if (fom_count <= 2)
-		return NULL;
 
 	down_read(&fom_procs_sem);
 	proc = get_fom_proc(pid);
@@ -277,7 +270,7 @@ struct file *fom_create_new_file(unsigned long start, unsigned long len,
 		proc = vmalloc(sizeof(struct fom_proc));
 		if (!proc) {
 			pr_err("fom_create_new_file: not enough memory for proc\n");
-			return NULL;
+			return;
 		}
 
 		proc->pid = pid;
@@ -288,7 +281,7 @@ struct file *fom_create_new_file(unsigned long start, unsigned long len,
 	if (!file)
 		goto err;
 
-	file->f = open_new_file(len, prot);
+	file->f = f;
 	if (!file->f)
 		goto err;
 	file->count = 1;
@@ -313,14 +306,12 @@ struct file *fom_create_new_file(unsigned long start, unsigned long len,
 		insert_new_proc(proc);
 	up_write(&fom_procs_sem);
 
-	return file->f;
-
+	return;
 err:
 	if (new_proc)
 		vfree(proc);
 	if (file)
 		vfree(file);
-	return NULL;
 }
 
 int fom_munmap(pid_t pid, unsigned long start, unsigned long len) {
@@ -455,8 +446,6 @@ void fom_check_exiting_proc(pid_t pid) {
 
 	if (!proc)
 		return;
-
-	fom_count = 0;
 
 	down_write(&fom_procs_sem);
 
