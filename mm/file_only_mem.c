@@ -100,6 +100,10 @@ static void insert_new_mapping(struct fom_proc *proc, struct fom_mapping *new_ma
 		if ((new_map->start >= cur->start && new_map->start < cur->end) ||
 			(new_map->end > cur->start && new_map->end <= cur->end)) {
 			pr_err("insert_new_mapping: Attempting to insert overlapping mapping\n");
+			pr_err("insert_new_mapping: old mapping %llx %llx\n",
+				cur->start, cur->end);
+			pr_err("insert_new_mapping: new mapping %llx %llx\n",
+				new_map->start, new_map->end);
 			BUG();
 		}
 
