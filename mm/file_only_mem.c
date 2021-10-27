@@ -200,6 +200,7 @@ static void drop_fom_file(struct fom_mapping *map) {
 	map->file->count--;
 	if (map->file->count <= 0) {
 		delete_fom_file(map->file->f);
+		fput(map->file->f);
 		vfree(map->file);
 		map->file = NULL;
 	}
