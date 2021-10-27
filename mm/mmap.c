@@ -258,11 +258,21 @@ SYSCALL_DEFINE1(brk, unsigned long, brk)
 	if (next && newbrk + PAGE_SIZE > vm_start_gap(next))
 		goto out;
 
-	brkvma = mas_prev(&mas, mm->start_brk);
 	/* Ok, looks good - let it rip. */
-	if (do_brk_flags(&mas, brkvma, oldbrk, newbrk - oldbrk, 0) < 0)
-		goto out;
+	if (use_file_only_mem(current->tgid)) {
+		vm_flags_t vm_flags;
+		unsigned long prot = PROT_READ | PROT_WRITE;
+		struct file *f = fom_create_new_file(newbrk-oldbrk, prot);
 
+		vm_flags = VM_DATA_DEFAULT_FLAGS | VM_ACCOUNT | mm->def_flags
+			| VM_SHARED | VM_MAYSHARE;
+		mmap_region(f, oldbrk, newbrk-oldbrk, vm_flags, 0, NULL);
+		fom_register_file(current->tgid, f, oldbrk, newbrk-oldbrk);
+	} else {
+		brkvma = mas_prev(&mas, mm->start_brk);
+		if (do_brk_flags(&mas, brkvma, oldbrk, newbrk-oldbrk, 0) < 0)
+			goto out;
+	}
 	mm->brk = brk;
 
 success:
