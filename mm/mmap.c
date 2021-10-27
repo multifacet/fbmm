@@ -271,8 +271,19 @@ SYSCALL_DEFINE1(brk, unsigned long, brk)
 		goto out;
 
 	/* Ok, looks good - let it rip. */
-	if (do_brk_flags(oldbrk, newbrk-oldbrk, 0, &uf) < 0)
-		goto out;
+	if (use_file_only_mem(current->tgid)) {
+		vm_flags_t vm_flags;
+		unsigned long prot = PROT_READ | PROT_WRITE;
+		struct file *f = fom_create_new_file(newbrk-oldbrk, prot);
+
+		vm_flags = VM_DATA_DEFAULT_FLAGS | VM_ACCOUNT | mm->def_flags
+			| VM_SHARED | VM_MAYSHARE;
+		mmap_region(f, oldbrk, newbrk-oldbrk, vm_flags, 0, NULL);
+		fom_register_file(current->tgid, f, oldbrk, newbrk-oldbrk);
+	} else {
+		if (do_brk_flags(oldbrk, newbrk-oldbrk, 0, &uf) < 0)
+			goto out;
+	}
 	mm->brk = brk;
 
 success:
