@@ -8,6 +8,7 @@
 #include <linux/security.h>
 #include <linux/vmalloc.h>
 #include <linux/falloc.h>
+#include <linux/timekeeping.h>
 
 enum file_only_mem_state {
 	FOM_OFF = 0,
@@ -43,6 +44,9 @@ static pid_t cur_proc = 0;
 static char file_dir[PATH_MAX];
 static struct rb_root fom_procs = RB_ROOT;
 static DECLARE_RWSEM(fom_procs_sem);
+
+static ktime_t file_create_time = 0;
+static int num_file_creates = 0;
 
 ///////////////////////////////////////////////////////////////////////////////
 // struct fom_proc functions
@@ -227,6 +231,7 @@ struct file *fom_create_new_file(unsigned long len, unsigned long prot) {
 	int open_flags = O_EXCL | O_TMPFILE;
 	umode_t open_mode = 0;
 	int ret = 0;
+	ktime_t start_time = ktime_get_ns();
 
 	// Determine what flags to use for the call to open
 	if (prot & PROT_EXEC)
@@ -253,6 +258,9 @@ struct file *fom_create_new_file(unsigned long len, unsigned long prot) {
 		delete_fom_file(f);
 		return NULL;
 	}
+
+	file_create_time += ktime_get_ns() - start_time;
+	num_file_creates++;
 
 	return f;
 }
@@ -571,10 +579,29 @@ static ssize_t fom_dir_store(struct kobject *kobj,
 static struct kobj_attribute fom_file_dir_attribute =
 __ATTR(file_dir, 0644, fom_dir_show, fom_dir_store);
 
+static ssize_t fom_stats_show(struct kobject *kobj,
+		struct kobj_attribute *attr, char *buf)
+{
+	return sprintf(buf, "%lld %d %lld\n", file_create_time, num_file_creates,
+		file_create_time / num_file_creates);
+}
+
+static ssize_t fom_stats_store(struct kobject *kobj,
+		struct kobj_attribute *attr,
+		const char *buf, size_t count)
+{
+	file_create_time = 0;
+	num_file_creates = 0;
+	return count;
+}
+static struct kobj_attribute fom_stats_attribute =
+__ATTR(stats, 0644, fom_stats_show, fom_stats_store);
+
 static struct attribute *file_only_mem_attr[] = {
 	&fom_state_attribute.attr,
 	&fom_pid_attribute.attr,
 	&fom_file_dir_attribute.attr,
+	&fom_stats_attribute.attr,
 	NULL,
 };
 
