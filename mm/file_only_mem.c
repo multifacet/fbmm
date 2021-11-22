@@ -47,6 +47,8 @@ static DECLARE_RWSEM(fom_procs_sem);
 
 static ktime_t file_create_time = 0;
 static u64 num_file_creates = 0;
+static ktime_t file_register_time = 0;
+static u64 num_file_registers = 0;
 
 ///////////////////////////////////////////////////////////////////////////////
 // struct fom_proc functions
@@ -272,6 +274,7 @@ void fom_register_file(pid_t pid, struct file *f,
 	struct fom_mapping *mapping = NULL;
 	struct fom_file *file = NULL;
 	bool new_proc = false;
+	ktime_t start_time = ktime_get_ns();
 
 	down_read(&fom_procs_sem);
 	proc = get_fom_proc(pid);
@@ -318,6 +321,9 @@ void fom_register_file(pid_t pid, struct file *f,
 	if (new_proc)
 		insert_new_proc(proc);
 	up_write(&fom_procs_sem);
+
+	file_register_time += ktime_get_ns() - start_time;
+	num_file_registers++;
 
 	return;
 err:
@@ -583,12 +589,22 @@ static ssize_t fom_stats_show(struct kobject *kobj,
 		struct kobj_attribute *attr, char *buf)
 {
     u64 avg_create_time = 0;
+    u64 avg_register_time = 0;
+    ssize_t count;
+
     if (num_file_creates != 0) {
         avg_create_time = file_create_time / num_file_creates;
     }
+    if (num_file_registers != 0) {
+        avg_register_time = file_register_time / num_file_registers;
+    }
 
-    return sprintf(buf, "%lld %lld %lld\n", file_create_time, num_file_creates,
-		avg_create_time);
+    count = sprintf(buf, "file create times: %lld %lld %lld\n", file_create_time,
+        num_file_creates, avg_create_time);
+    count += sprintf(&buf[count], "file register times: %lld %lld %lld\n", file_register_time,
+        num_file_registers, avg_register_time);
+
+    return count;
 }
 
 static ssize_t fom_stats_store(struct kobject *kobj,
