@@ -46,7 +46,7 @@ static struct rb_root fom_procs = RB_ROOT;
 static DECLARE_RWSEM(fom_procs_sem);
 
 static ktime_t file_create_time = 0;
-static int num_file_creates = 0;
+static u64 num_file_creates = 0;
 
 ///////////////////////////////////////////////////////////////////////////////
 // struct fom_proc functions
@@ -582,8 +582,13 @@ __ATTR(file_dir, 0644, fom_dir_show, fom_dir_store);
 static ssize_t fom_stats_show(struct kobject *kobj,
 		struct kobj_attribute *attr, char *buf)
 {
-	return sprintf(buf, "%lld %d %lld\n", file_create_time, num_file_creates,
-		file_create_time / num_file_creates);
+    u64 avg_create_time = 0;
+    if (num_file_creates != 0) {
+        avg_create_time = file_create_time / num_file_creates;
+    }
+
+    return sprintf(buf, "%lld %lld %lld\n", file_create_time, num_file_creates,
+		avg_create_time);
 }
 
 static ssize_t fom_stats_store(struct kobject *kobj,
