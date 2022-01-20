@@ -613,6 +613,8 @@ static ssize_t fom_stats_store(struct kobject *kobj,
 {
 	file_create_time = 0;
 	num_file_creates = 0;
+	file_register_time = 0;
+	num_file_registers = 0;
 	return count;
 }
 static struct kobj_attribute fom_stats_attribute =
