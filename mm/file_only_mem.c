@@ -170,42 +170,10 @@ static int truncate_fom_file(struct file *f, unsigned long len) {
 	return error;
 }
 
-// Most of this is taken from do_unlinkat in fs/namei.c
-static void delete_fom_file(struct file *f) {
-	struct vfsmount *mnt;
-	struct dentry *dentry;
-	struct dentry *parent;
-	int error;
-
-	filp_close(f, current->files);
-
-	mnt = f->f_path.mnt;
-	dentry = f->f_path.dentry;
-	parent = dentry->d_parent;
-
-	error = mnt_want_write(mnt);
-	if (error) {
-		pr_err("delete_fom_file: Can't delete file\n");
-		return;
-	}
-
-	inode_lock_nested(parent->d_inode, I_MUTEX_PARENT);
-
-	error = security_path_unlink(&f->f_path, dentry);
-	if (error)
-		goto err;
-
-	vfs_unlink(mnt_user_ns(mnt), parent->d_inode, dentry, NULL);
-
-err:
-	inode_unlock(parent->d_inode);
-	mnt_drop_write(mnt);
-}
-
 static void drop_fom_file(struct fom_mapping *map) {
 	map->file->count--;
 	if (map->file->count <= 0) {
-		delete_fom_file(map->file->f);
+		filp_close(map->file->f, current->files);
 		fput(map->file->f);
 		vfree(map->file);
 		map->file = NULL;
@@ -257,7 +225,7 @@ struct file *fom_create_new_file(unsigned long len, unsigned long prot) {
 	// Set the file to the correct size
 	ret = truncate_fom_file(f, len);
 	if (ret) {
-		delete_fom_file(f);
+		filp_close(f, current->files);
 		return NULL;
 	}
 
