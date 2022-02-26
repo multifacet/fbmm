@@ -1461,6 +1461,23 @@ unsigned long do_mmap(struct file *file, unsigned long addr,
 	if (mm->map_count > sysctl_max_map_count)
 		return -ENOMEM;
 
+	// See if we want to use file only memory
+	if (!file && (flags & MAP_ANONYMOUS) && use_file_only_mem(current->tgid)) {
+		file = fom_create_new_file(len, prot);
+
+		if (file) {
+			created_fom_file = true;
+			flags = flags & ~MAP_ANONYMOUS;
+
+			// If the caller used MAP_PRIVATE, switch it to MAP_SHARED so that
+			// the system doesn't save the writes to anonymous memory
+			if (flags & MAP_PRIVATE) {
+				flags = flags & ~MAP_PRIVATE;
+				flags = flags | MAP_SHARED;
+			}
+		}
+	}
+
 	/* Obtain the address to map to. we verify (or select) it and ensure
 	 * that it represents a valid section of the address space.
 	 */
@@ -1492,23 +1509,6 @@ unsigned long do_mmap(struct file *file, unsigned long addr,
 
 	if (mlock_future_check(mm, vm_flags, len))
 		return -EAGAIN;
-
-	// See if we want to use file only memory
-	if (!file && (flags & MAP_ANONYMOUS) && use_file_only_mem(current->tgid)) {
-		file = fom_create_new_file(len, prot);
-
-		if (file) {
-			created_fom_file = true;
-			flags = flags & ~MAP_ANONYMOUS;
-
-			// If the caller used MAP_PRIVATE, switch it to MAP_SHARED so that
-			// the system doesn't save the writes to anonymous memory
-			if (flags & MAP_PRIVATE) {
-				flags = flags & ~MAP_PRIVATE;
-				flags = flags | MAP_SHARED;
-			}
-		}
-	}
 
 	if (file) {
 		struct inode *inode = file_inode(file);
