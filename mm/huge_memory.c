@@ -92,8 +92,8 @@ bool hugepage_vma_check(struct vm_area_struct *vma, unsigned long vm_flags,
 		return false;
 
 	/* khugepaged doesn't collapse DAX vma, but page fault is fine. */
-	if (vma_is_dax(vma))
-		return in_pf;
+	//if (vma_is_dax(vma))
+	//	return in_pf;
 
 	/*
 	 * Special VMA and hugetlb VMA.
