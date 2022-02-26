@@ -588,11 +588,43 @@ static ssize_t fom_stats_store(struct kobject *kobj,
 static struct kobj_attribute fom_stats_attribute =
 __ATTR(stats, 0644, fom_stats_show, fom_stats_store);
 
+int fom_dax_pte_fault_size = 1;
+static ssize_t fom_dax_pte_fault_size_show(struct kobject *kobj,
+		struct kobj_attribute *attr, char *buf)
+{
+	return sprintf(buf, "%d\n", fom_dax_pte_fault_size);
+}
+
+static ssize_t fom_dax_pte_fault_size_store(struct kobject *kobj,
+		struct kobj_attribute *attr,
+		const char *buf, size_t count)
+{
+	int fault_size;
+	int ret;
+
+	ret = kstrtoint(buf, 0, &fault_size);
+
+	if (ret != 0) {
+		fom_dax_pte_fault_size = 1;
+		return ret;
+	}
+
+	if (fault_size > 0)
+		fom_dax_pte_fault_size = fault_size;
+	else
+		fom_dax_pte_fault_size = 1;
+
+	return count;
+}
+static struct kobj_attribute fom_dax_pte_fault_size_attribute =
+__ATTR(pte_fault_size, 0644, fom_dax_pte_fault_size_show, fom_dax_pte_fault_size_store);
+
 static struct attribute *file_only_mem_attr[] = {
 	&fom_state_attribute.attr,
 	&fom_pid_attribute.attr,
 	&fom_file_dir_attribute.attr,
 	&fom_stats_attribute.attr,
+	&fom_dax_pte_fault_size_attribute.attr,
 	NULL,
 };
 
