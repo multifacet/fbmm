@@ -5265,6 +5265,40 @@ EXPORT_SYMBOL(__might_fault);
 #endif
 
 #if defined(CONFIG_TRANSPARENT_HUGEPAGE) || defined(CONFIG_HUGETLBFS)
+static inline void zero_fill_page_ntstores(struct page *page)
+{
+	void *kaddr;
+	kaddr = kmap_atomic(page);
+	__asm__ (
+		"push %%rax;"
+		"push %%rcx;"
+		"push %%rdi;"
+		"movq   %0, %%rdi;"
+		"xorq    %%rax, %%rax;"
+		"movl    $4096/64, %%ecx;"
+		".p2align 4;"
+		"1:;"
+		"decl    %%ecx;"
+		"movnti  %%rax,(%%rdi);"
+		"movnti  %%rax,0x8(%%rdi);"
+		"movnti  %%rax,0x10(%%rdi);"
+		"movnti  %%rax,0x18(%%rdi);"
+		"movnti  %%rax,0x20(%%rdi);"
+		"movnti  %%rax,0x28(%%rdi);"
+		"movnti  %%rax,0x30(%%rdi);"
+		"movnti  %%rax,0x38(%%rdi);"
+		"leaq    64(%%rdi),%%rdi;"
+		"jnz     1b;"
+		"nop;"
+		"pop %%rdi;"
+		"pop %%rcx;"
+		"pop %%rax;"
+		: /* output */
+		: "a" (kaddr)
+	);
+	kunmap_atomic(kaddr);
+}
+
 /*
  * Process all subpages of the specified huge page with the specified
  * operation.  The target subpage will be processed last to keep its
@@ -5276,6 +5310,7 @@ static inline void process_huge_page(
 	void *arg)
 {
 	int i, n, base, l;
+    struct page *page = arg;
 	unsigned long addr = addr_hint &
 		~(((unsigned long)pages_per_huge_page << PAGE_SHIFT) - 1);
 
@@ -5289,7 +5324,8 @@ static inline void process_huge_page(
 		/* Process subpages at the end of huge page */
 		for (i = pages_per_huge_page - 1; i >= 2 * n; i--) {
 			cond_resched();
-			process_subpage(addr + i * PAGE_SIZE, i, arg);
+//			process_subpage(addr + i * PAGE_SIZE, i, arg);
+			zero_fill_page_ntstores(page + i);
 		}
 	} else {
 		/* If target subpage in second half of huge page */
@@ -5298,7 +5334,8 @@ static inline void process_huge_page(
 		/* Process subpages at the begin of huge page */
 		for (i = 0; i < base; i++) {
 			cond_resched();
-			process_subpage(addr + i * PAGE_SIZE, i, arg);
+//			process_subpage(addr + i * PAGE_SIZE, i, arg);
+			zero_fill_page_ntstores(page + i);
 		}
 	}
 	/*
@@ -5310,9 +5347,11 @@ static inline void process_huge_page(
 		int right_idx = base + 2 * l - 1 - i;
 
 		cond_resched();
-		process_subpage(addr + left_idx * PAGE_SIZE, left_idx, arg);
+//		process_subpage(addr + left_idx * PAGE_SIZE, left_idx, arg);
+		zero_fill_page_ntstores(page + left_idx);
 		cond_resched();
-		process_subpage(addr + right_idx * PAGE_SIZE, right_idx, arg);
+//		process_subpage(addr + right_idx * PAGE_SIZE, right_idx, arg);
+		zero_fill_page_ntstores(page + right_idx);
 	}
 }
 
