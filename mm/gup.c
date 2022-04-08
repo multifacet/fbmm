@@ -664,14 +664,17 @@ static struct page *follow_pmd_mask(struct vm_area_struct *vma,
 		return no_page_table(vma, flags);
 	if (!pmd_present(pmdval))
 		return no_page_table(vma, flags);
-	if (pmd_devmap(pmdval) && !use_file_only_mem(current->tgid)) {
+	if (pmd_devmap(pmdval)) {
 		ptl = pmd_lock(mm, pmd);
 		page = follow_devmap_pmd(vma, address, pmd, flags, &ctx->pgmap);
 		spin_unlock(ptl);
-		if (page)
+		if (page) {
+			if (pmd_val(pmdval) & _PAGE_PSE)
+				ctx->page_mask = HPAGE_PMD_NR - 1;
 			return page;
+		}
 	}
-	if (likely(!pmd_trans_huge(pmdval)) && !((pmd_val(pmdval) & _PAGE_PSE) && use_file_only_mem(current->tgid)))
+	if (likely(!pmd_trans_huge(pmdval)))
 		return follow_page_pte(vma, address, pmd, flags, &ctx->pgmap);
 
 	if (pmd_protnone(pmdval) && !gup_can_follow_protnone(flags))
@@ -682,7 +685,7 @@ static struct page *follow_pmd_mask(struct vm_area_struct *vma,
 		spin_unlock(ptl);
 		return no_page_table(vma, flags);
 	}
-	if (unlikely(!pmd_trans_huge(*pmd)) && !((pmd_val(pmdval) & _PAGE_PSE) && use_file_only_mem(current->tgid))) {
+	if (unlikely(!pmd_trans_huge(*pmd))) {
 		spin_unlock(ptl);
 		return follow_page_pte(vma, address, pmd, flags, &ctx->pgmap);
 	}
