@@ -190,6 +190,21 @@ static blk_status_t pmem_do_write(struct pmem_device *pmem,
 	return rc;
 }
 
+static blk_status_t pmem_do_zero(struct pmem_device *pmem,
+			sector_t sector, unsigned long len)
+{
+	blk_status_t rc = BLK_STS_OK;
+	phys_addr_t pmem_off = sector * 512 + pmem->data_offset;
+	void *pmem_addr = pmem->virt_addr + pmem_off;
+
+	if (unlikely(is_bad_pmem(&pmem->bb, sector, len)))
+		return BLK_STS_IOERR;
+
+	memset_flushcache(pmem_addr, 0, len);
+
+	return rc;
+}
+
 static blk_qc_t pmem_submit_bio(struct bio *bio)
 {
 	int ret = 0;
@@ -200,6 +215,7 @@ static blk_qc_t pmem_submit_bio(struct bio *bio)
 	struct bvec_iter iter;
 	struct pmem_device *pmem = bio->bi_bdev->bd_disk->private_data;
 	struct nd_region *nd_region = to_region(pmem);
+	unsigned int op = bio_op(bio);
 
 	if (bio->bi_opf & REQ_PREFLUSH)
 		ret = nvdimm_flush(nd_region, bio);
@@ -207,18 +223,24 @@ static blk_qc_t pmem_submit_bio(struct bio *bio)
 	do_acct = blk_queue_io_stat(bio->bi_bdev->bd_disk->queue);
 	if (do_acct)
 		start = bio_start_io_acct(bio);
-	bio_for_each_segment(bvec, bio, iter) {
-		if (op_is_write(bio_op(bio)))
-			rc = pmem_do_write(pmem, bvec.bv_page, bvec.bv_offset,
-				iter.bi_sector, bvec.bv_len);
-		else
-			rc = pmem_do_read(pmem, bvec.bv_page, bvec.bv_offset,
-				iter.bi_sector, bvec.bv_len);
-		if (rc) {
-			bio->bi_status = rc;
-			break;
+
+	if (op == REQ_OP_WRITE_ZEROES) {
+		rc = pmem_do_zero(pmem, bio->bi_iter.bi_sector, bio->bi_iter.bi_size);
+	} else {
+		bio_for_each_segment(bvec, bio, iter) {
+			if (op_is_write(bio_op(bio)))
+				rc = pmem_do_write(pmem, bvec.bv_page, bvec.bv_offset,
+					iter.bi_sector, bvec.bv_len);
+			else
+				rc = pmem_do_read(pmem, bvec.bv_page, bvec.bv_offset,
+					iter.bi_sector, bvec.bv_len);
+			if (rc) {
+				bio->bi_status = rc;
+				break;
+			}
 		}
 	}
+
 	if (do_acct)
 		bio_end_io_acct(bio, start);
 
@@ -424,6 +446,7 @@ static int pmem_attach_disk(struct device *dev,
 	if (!disk)
 		return -ENOMEM;
 	q = disk->queue;
+	blk_queue_max_write_zeroes_sectors(q, 4096);
 
 	pmem->disk = disk;
 	pmem->pgmap.owner = pmem;

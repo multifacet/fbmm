@@ -179,6 +179,63 @@ void __memcpy_flushcache(void *_dst, const void *_src, size_t size)
 }
 EXPORT_SYMBOL_GPL(__memcpy_flushcache);
 
+void memset_flushcache(void *dst, uint8_t data, size_t len) {
+	uint64_t dest = (uint64_t) dst;
+	uint16_t half_word = (data << 8) | data;
+	uint32_t word = (half_word << 16) | half_word;
+	uint64_t dword = (word << 32) | word;
+
+	/* Check for alignment */
+	if (!IS_ALIGNED(dest, 8)) {
+		unsigned l = min_t(unsigned, len, ALIGN(dest, 8) - dest);
+
+		memset(dest, data, l);
+		clean_cache_range((void *)dest, l);
+		dest += l;
+		len -= l;
+		if (!len)
+			return;
+	}
+
+	while (len >= 32) {
+		asm("movq %1, %%r8\n"
+			"movnti %%r8, (%0)\n"
+			"movnti %%r8, 8(%0)\n"
+			"movnti %%r8, 16(%0)\n"
+			"movnti %%r8, 24(%0)\n"
+			:: "r" (dest), "r" (dword)
+			: "memory", "r8"
+		);
+		dest += 32;
+		len -= 32;
+	}
+
+	while (len >= 8) {
+		asm("movq %1, %%r8\n"
+			"movnti %%r8, (%0)\n"
+			:: "r" (dest), "r" (dword)
+			: "memory", "r8"
+		);
+		dest += 8;
+		len -= 8;
+	}
+
+	while (len >= 4) {
+		asm("movl %1, %%r8d\n"
+			"movnti %%r8d, (%0)\n"
+			:: "r" (dest), "r" (word)
+			: "memory", "r8"
+		);
+		dest += 4;
+		len -= 4;
+	}
+
+	if (len) {
+		memset((void *)dest, data, len);
+		clean_cache_range((void *)dest, len);
+	}
+}
+
 void memcpy_page_flushcache(char *to, struct page *page, size_t offset,
 		size_t len)
 {

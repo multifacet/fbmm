@@ -103,6 +103,8 @@ static __always_inline void memcpy_flushcache(void *dst, const void *src, size_t
 	}
 	__memcpy_flushcache(dst, src, cnt);
 }
+
+void memset_flushcache(void *dst, uint8_t data, size_t len);
 #endif
 
 #endif /* __KERNEL__ */
