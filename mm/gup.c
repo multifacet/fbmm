@@ -623,6 +623,7 @@ no_page:
 	return no_page_table(vma, flags);
 }
 
+extern int fom_follow_page_mask_fix;
 static struct page *follow_pmd_mask(struct vm_area_struct *vma,
 				    unsigned long address, pud_t *pudp,
 				    unsigned int flags,
@@ -677,7 +678,7 @@ retry:
 		page = follow_devmap_pmd(vma, address, pmd, flags, &ctx->pgmap);
 		spin_unlock(ptl);
 		if (page) {
-			if (pmd_val(pmdval) & _PAGE_PSE)
+			if ((pmd_val(pmdval) & _PAGE_PSE) && fom_follow_page_mask_fix)
 				ctx->page_mask = HPAGE_PMD_NR - 1;
 			return page;
 		}

@@ -390,6 +390,7 @@ EXPORT_SYMBOL(__blkdev_issue_zeroout);
  *  writing zeroes to the device.  See __blkdev_issue_zeroout() for the
  *  valid values for %flags.
  */
+extern int fom_pmem_write_zeroes;
 int blkdev_issue_zeroout(struct block_device *bdev, sector_t sector,
 		sector_t nr_sects, gfp_t gfp_mask, unsigned flags)
 {
@@ -406,7 +407,7 @@ int blkdev_issue_zeroout(struct block_device *bdev, sector_t sector,
 retry:
 	bio = NULL;
 	blk_start_plug(&plug);
-	if (try_write_zeroes) {
+	if (try_write_zeroes && fom_pmem_write_zeroes) {
 		ret = __blkdev_issue_write_zeroes(bdev, sector, nr_sects,
 						  gfp_mask, &bio, flags);
 	} else if (!(flags & BLKDEV_ZERO_NOFALLBACK)) {
