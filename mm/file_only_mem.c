@@ -712,6 +712,68 @@ static ssize_t fom_pmem_write_zeroes_store(struct kobject *kobj,
 static struct kobj_attribute fom_pmem_write_zeroes_attribute =
 __ATTR(pmem_write_zeroes, 0644, fom_pmem_write_zeroes_show, fom_pmem_write_zeroes_store);
 
+int fom_track_pfn_insert = 0;
+static ssize_t fom_track_pfn_insert_show(struct kobject *kobj,
+		struct kobj_attribute *attr, char *buf)
+{
+	return sprintf(buf, "%d\n", fom_track_pfn_insert);
+}
+
+static ssize_t fom_track_pfn_insert_store(struct kobject *kobj,
+		struct kobj_attribute *attr,
+		const char *buf, size_t count)
+{
+	int val;
+	int ret;
+
+	ret = kstrtoint(buf, 0, &val);
+
+	if (ret != 0) {
+		fom_track_pfn_insert = 0;
+		return ret;
+	}
+
+	if (val == 0)
+		fom_track_pfn_insert = 0;
+	else
+		fom_track_pfn_insert = 1;
+
+	return count;
+}
+static struct kobj_attribute fom_track_pfn_insert_attribute =
+__ATTR(track_pfn_insert, 0644, fom_track_pfn_insert_show, fom_track_pfn_insert_store);
+
+int fom_mark_inode_dirty = 0;
+static ssize_t fom_mark_inode_dirty_show(struct kobject *kobj,
+		struct kobj_attribute *attr, char *buf)
+{
+	return sprintf(buf, "%d\n", fom_mark_inode_dirty);
+}
+
+static ssize_t fom_mark_inode_dirty_store(struct kobject *kobj,
+		struct kobj_attribute *attr,
+		const char *buf, size_t count)
+{
+	int val;
+	int ret;
+
+	ret = kstrtoint(buf, 0, &val);
+
+	if (ret != 0) {
+		fom_mark_inode_dirty = 0;
+		return ret;
+	}
+
+	if (val == 0)
+		fom_mark_inode_dirty = 0;
+	else
+		fom_mark_inode_dirty = 1;
+
+	return count;
+}
+static struct kobj_attribute fom_mark_inode_dirty_attribute =
+__ATTR(mark_inode_dirty, 0644, fom_mark_inode_dirty_show, fom_mark_inode_dirty_store);
+
 static struct attribute *file_only_mem_attr[] = {
 	&fom_state_attribute.attr,
 	&fom_pid_attribute.attr,
@@ -721,6 +783,8 @@ static struct attribute *file_only_mem_attr[] = {
 	&nt_huge_page_zero_attribute.attr,
 	&fom_follow_page_mask_fix_attribute.attr,
 	&fom_pmem_write_zeroes_attribute.attr,
+	&fom_track_pfn_insert_attribute.attr,
+	&fom_mark_inode_dirty_attribute.attr,
 	NULL,
 };
 
