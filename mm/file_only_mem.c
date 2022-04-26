@@ -619,12 +619,108 @@ static ssize_t fom_dax_pte_fault_size_store(struct kobject *kobj,
 static struct kobj_attribute fom_dax_pte_fault_size_attribute =
 __ATTR(pte_fault_size, 0644, fom_dax_pte_fault_size_show, fom_dax_pte_fault_size_store);
 
+int nt_huge_page_zero = 1;
+static ssize_t nt_huge_page_zero_show(struct kobject *kobj,
+		struct kobj_attribute *attr, char *buf)
+{
+	return sprintf(buf, "%d\n", nt_huge_page_zero);
+}
+
+static ssize_t nt_huge_page_zero_store(struct kobject *kobj,
+		struct kobj_attribute *attr,
+		const char *buf, size_t count)
+{
+	int val;
+	int ret;
+
+	ret = kstrtoint(buf, 0, &val);
+
+	if (ret != 0) {
+		nt_huge_page_zero = 1;
+		return ret;
+	}
+
+	if (val == 0)
+		nt_huge_page_zero = 0;
+	else
+		nt_huge_page_zero = 1;
+
+	return count;
+}
+static struct kobj_attribute nt_huge_page_zero_attribute =
+__ATTR(nt_huge_page_zero, 0644, nt_huge_page_zero_show, nt_huge_page_zero_store);
+
+int fom_follow_page_mask_fix = 1;
+static ssize_t fom_follow_page_mask_fix_show(struct kobject *kobj,
+		struct kobj_attribute *attr, char *buf)
+{
+	return sprintf(buf, "%d\n", fom_follow_page_mask_fix);
+}
+
+static ssize_t fom_follow_page_mask_fix_store(struct kobject *kobj,
+		struct kobj_attribute *attr,
+		const char *buf, size_t count)
+{
+	int val;
+	int ret;
+
+	ret = kstrtoint(buf, 0, &val);
+
+	if (ret != 0) {
+		fom_follow_page_mask_fix = 1;
+		return ret;
+	}
+
+	if (val == 0)
+		fom_follow_page_mask_fix = 0;
+	else
+		fom_follow_page_mask_fix = 1;
+
+	return count;
+}
+static struct kobj_attribute fom_follow_page_mask_fix_attribute =
+__ATTR(follow_page_mask_fix, 0644, fom_follow_page_mask_fix_show, fom_follow_page_mask_fix_store);
+
+int fom_pmem_write_zeroes = 1;
+static ssize_t fom_pmem_write_zeroes_show(struct kobject *kobj,
+		struct kobj_attribute *attr, char *buf)
+{
+	return sprintf(buf, "%d\n", fom_pmem_write_zeroes);
+}
+
+static ssize_t fom_pmem_write_zeroes_store(struct kobject *kobj,
+		struct kobj_attribute *attr,
+		const char *buf, size_t count)
+{
+	int val;
+	int ret;
+
+	ret = kstrtoint(buf, 0, &val);
+
+	if (ret != 0) {
+		fom_pmem_write_zeroes = 1;
+		return ret;
+	}
+
+	if (val == 0)
+		fom_pmem_write_zeroes = 0;
+	else
+		fom_pmem_write_zeroes = 1;
+
+	return count;
+}
+static struct kobj_attribute fom_pmem_write_zeroes_attribute =
+__ATTR(pmem_write_zeroes, 0644, fom_pmem_write_zeroes_show, fom_pmem_write_zeroes_store);
+
 static struct attribute *file_only_mem_attr[] = {
 	&fom_state_attribute.attr,
 	&fom_pid_attribute.attr,
 	&fom_file_dir_attribute.attr,
 	&fom_stats_attribute.attr,
 	&fom_dax_pte_fault_size_attribute.attr,
+	&nt_huge_page_zero_attribute.attr,
+	&fom_follow_page_mask_fix_attribute.attr,
+	&fom_pmem_write_zeroes_attribute.attr,
 	NULL,
 };
 

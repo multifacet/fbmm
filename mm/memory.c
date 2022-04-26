@@ -5693,6 +5693,7 @@ static inline void zero_fill_page_ntstores(struct page *page)
  * operation.  The target subpage will be processed last to keep its
  * cache lines hot.
  */
+extern int nt_huge_page_zero;
 static inline void process_huge_page(
 	unsigned long addr_hint, unsigned int pages_per_huge_page,
 	void (*process_subpage)(unsigned long addr, int idx, void *arg),
@@ -5713,8 +5714,11 @@ static inline void process_huge_page(
 		/* Process subpages at the end of huge page */
 		for (i = pages_per_huge_page - 1; i >= 2 * n; i--) {
 			cond_resched();
-//			process_subpage(addr + i * PAGE_SIZE, i, arg);
-			zero_fill_page_ntstores(page + i);
+
+			if (nt_huge_page_zero)
+				zero_fill_page_ntstores(page + i);
+			else
+				process_subpage(addr + i * PAGE_SIZE, i, arg);
 		}
 	} else {
 		/* If target subpage in second half of huge page */
@@ -5723,8 +5727,10 @@ static inline void process_huge_page(
 		/* Process subpages at the begin of huge page */
 		for (i = 0; i < base; i++) {
 			cond_resched();
-//			process_subpage(addr + i * PAGE_SIZE, i, arg);
-			zero_fill_page_ntstores(page + i);
+			if (nt_huge_page_zero)
+				zero_fill_page_ntstores(page + i);
+			else
+				process_subpage(addr + i * PAGE_SIZE, i, arg);
 		}
 	}
 	/*
@@ -5736,11 +5742,18 @@ static inline void process_huge_page(
 		int right_idx = base + 2 * l - 1 - i;
 
 		cond_resched();
-//		process_subpage(addr + left_idx * PAGE_SIZE, left_idx, arg);
-		zero_fill_page_ntstores(page + left_idx);
+
+		if (nt_huge_page_zero)
+			zero_fill_page_ntstores(page + left_idx);
+		else
+			process_subpage(addr + left_idx * PAGE_SIZE, left_idx, arg);
+
 		cond_resched();
-//		process_subpage(addr + right_idx * PAGE_SIZE, right_idx, arg);
-		zero_fill_page_ntstores(page + right_idx);
+
+		if (nt_huge_page_zero)
+			zero_fill_page_ntstores(page + right_idx);
+		else
+			process_subpage(addr + right_idx * PAGE_SIZE, right_idx, arg);
 	}
 }
 
