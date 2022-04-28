@@ -4041,6 +4041,7 @@ static int get_implied_cluster_alloc(struct super_block *sb,
  *
  * return < 0, error case.
  */
+#include <linux/file_only_mem.h>
 int ext4_ext_map_blocks(handle_t *handle, struct inode *inode,
 			struct ext4_map_blocks *map, int flags)
 {

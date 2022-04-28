@@ -274,7 +274,7 @@ SYSCALL_DEFINE1(brk, unsigned long, brk)
 	if (use_file_only_mem(current->tgid)) {
 		vm_flags_t vm_flags;
 		unsigned long prot = PROT_READ | PROT_WRITE;
-		struct file *f = fom_create_new_file(newbrk-oldbrk, prot);
+		struct file *f = fom_create_new_file(newbrk-oldbrk, prot, 0);
 
 		vm_flags = VM_DATA_DEFAULT_FLAGS | VM_ACCOUNT | mm->def_flags
 			| VM_SHARED | VM_MAYSHARE;
@@ -1463,7 +1463,7 @@ unsigned long do_mmap(struct file *file, unsigned long addr,
 
 	// See if we want to use file only memory
 	if (!file && (flags & MAP_ANONYMOUS) && use_file_only_mem(current->tgid)) {
-		file = fom_create_new_file(len, prot);
+		file = fom_create_new_file(len, prot, flags);
 
 		if (file) {
 			created_fom_file = true;
