@@ -150,7 +150,7 @@ static struct fom_mapping *find_mapping(struct fom_proc *proc, unsigned long add
 // Helper functions
 
 // Most of this is taken from do_sys_truncate in fs/open.c
-static int truncate_fom_file(struct file *f, unsigned long len) {
+static int truncate_fom_file(struct file *f, unsigned long len, int flags) {
 	struct inode *inode;
 	struct dentry *dentry;
 	int error;
@@ -158,14 +158,18 @@ static int truncate_fom_file(struct file *f, unsigned long len) {
 	dentry = f->f_path.dentry;
 	inode = dentry->d_inode;
 
-	sb_start_write(inode->i_sb);
-	error = locks_verify_truncate(inode, f, len);
-	if (!error)
-		error = security_path_truncate(&f->f_path);
-	if (!error)
-		error = do_truncate(file_mnt_user_ns(f), dentry, len,
-				    ATTR_MTIME | ATTR_CTIME, f);
-	sb_end_write(inode->i_sb);
+	if (flags & MAP_POPULATE) {
+		error = vfs_fallocate(f, 0, 0, len);
+	} else {
+		sb_start_write(inode->i_sb);
+		error = locks_verify_truncate(inode, f, len);
+		if (!error)
+			error = security_path_truncate(&f->f_path);
+		if (!error)
+			error = do_truncate(file_mnt_user_ns(f), dentry, len,
+					    ATTR_MTIME | ATTR_CTIME, f);
+		sb_end_write(inode->i_sb);
+	}
 
 	return error;
 }
@@ -196,7 +200,7 @@ bool use_file_only_mem(pid_t pid) {
 	return false;
 }
 
-struct file *fom_create_new_file(unsigned long len, unsigned long prot) {
+struct file *fom_create_new_file(unsigned long len, unsigned long prot, int flags) {
 	struct file *f;
 	int open_flags = O_EXCL | O_TMPFILE;
 	umode_t open_mode = 0;
@@ -223,7 +227,7 @@ struct file *fom_create_new_file(unsigned long len, unsigned long prot) {
 		return NULL;
 
 	// Set the file to the correct size
-	ret = truncate_fom_file(f, len);
+	ret = truncate_fom_file(f, len, flags);
 	if (ret) {
 		filp_close(f, current->files);
 		return NULL;
