@@ -50,6 +50,8 @@ static u64 num_file_creates = 0;
 static ktime_t file_register_time = 0;
 static u64 num_file_registers = 0;
 
+static int fom_prealloc_map_populate = 1;
+
 ///////////////////////////////////////////////////////////////////////////////
 // struct fom_proc functions
 
@@ -158,7 +160,7 @@ static int truncate_fom_file(struct file *f, unsigned long len, int flags) {
 	dentry = f->f_path.dentry;
 	inode = dentry->d_inode;
 
-	if (flags & MAP_POPULATE) {
+	if ((flags & MAP_POPULATE) && fom_prealloc_map_populate) {
 		error = vfs_fallocate(f, 0, 0, len);
 	} else {
 		sb_start_write(inode->i_sb);
@@ -778,6 +780,36 @@ static ssize_t fom_mark_inode_dirty_store(struct kobject *kobj,
 static struct kobj_attribute fom_mark_inode_dirty_attribute =
 __ATTR(mark_inode_dirty, 0644, fom_mark_inode_dirty_show, fom_mark_inode_dirty_store);
 
+static ssize_t fom_prealloc_map_populate_show(struct kobject *kobj,
+		struct kobj_attribute *attr, char *buf)
+{
+	return sprintf(buf, "%d\n", fom_prealloc_map_populate);
+}
+
+static ssize_t fom_prealloc_map_populate_store(struct kobject *kobj,
+		struct kobj_attribute *attr,
+		const char *buf, size_t count)
+{
+	int val;
+	int ret;
+
+	ret = kstrtoint(buf, 0, &val);
+
+	if (ret != 0) {
+		fom_prealloc_map_populate = 1;
+		return ret;
+	}
+
+	if (val == 0)
+		fom_prealloc_map_populate = 0;
+	else
+		fom_prealloc_map_populate = 1;
+
+	return count;
+}
+static struct kobj_attribute fom_prealloc_map_populate_attribute =
+__ATTR(prealloc_map_populate, 0644, fom_prealloc_map_populate_show, fom_prealloc_map_populate_store);
+
 static struct attribute *file_only_mem_attr[] = {
 	&fom_state_attribute.attr,
 	&fom_pid_attribute.attr,
@@ -789,6 +821,7 @@ static struct attribute *file_only_mem_attr[] = {
 	&fom_pmem_write_zeroes_attribute.attr,
 	&fom_track_pfn_insert_attribute.attr,
 	&fom_mark_inode_dirty_attribute.attr,
+	&fom_prealloc_map_populate_attribute.attr,
 	NULL,
 };
 
