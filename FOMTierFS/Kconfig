@@ -1,0 +1,3 @@
+config FOMTIERFS
+    tristate "Adds the FOMTierFS"
+    default m
