@@ -9,38 +9,61 @@
 #include <linux/gfp.h>
 #include <linux/pfn_t.h>
 #include <linux/list.h>
+#include <linux/iomap.h>
+#include <linux/dax.h>
+#include <linux/mman.h>
 
 // A lot of the boilerplate here is taken from the ramfs code
 
 static const struct super_operations fomtierfs_ops;
 static const struct inode_operations fomtierfs_dir_inode_operations;
 
+struct fomtierfs_sb_info {
+    struct dax_device *daxdev;
+};
+
+static int fomtierfs_iomap_begin(struct inode *inode, loff_t offset, loff_t length,
+                unsigned flags, struct iomap *iomap, struct iomap *srcmap)
+{
+    struct fomtierfs_sb_info *sb_info = inode->i_sb->s_fs_info;
+    static u64 paddr = 0;
+
+    iomap->flags = 0;
+    iomap->bdev = inode->i_sb->s_bdev;
+    iomap->dax_dev = sb_info->daxdev;
+    iomap->offset = offset;
+    iomap->length = length;
+    if (paddr > offset) {
+        iomap->type = IOMAP_MAPPED;
+        iomap->addr = offset;
+    } else {
+        iomap->flags |= IOMAP_F_NEW;
+        iomap->type = IOMAP_MAPPED;
+        iomap->addr = paddr;
+        paddr += length;
+    }
+
+    return 0;
+}
+
+static int fomtierfs_iomap_end(struct inode *inode, loff_t offset, loff_t length,
+                ssize_t written, unsigned flags, struct iomap *iomap)
+{
+    return 0;
+}
+
+const struct iomap_ops fomtierfs_iomap_ops = {
+    .iomap_begin = fomtierfs_iomap_begin,
+    .iomap_end = fomtierfs_iomap_end,
+};
+
 static vm_fault_t fomtierfs_fault(struct vm_fault *vmf)
 {
     vm_fault_t result = 0;
-    pte_t entry;
+    pfn_t pfn;
+    int error;
 
-    if (vmf->flags & FAULT_FLAG_MKWRITE) {
-        entry = pte_mkwrite(vmf->orig_pte);
-
-    } else {
-        struct page *page = alloc_pages(__GFP_ZERO | GFP_USER | GFP_ATOMIC, 0);
-        if (!page)
-            return VM_FAULT_OOM;
-
-        entry = mk_pte(page, vmf->vma->vm_page_prot);
-        if (vmf->flags & FAULT_FLAG_WRITE) {
-            entry = pte_mkwrite(entry);
-        }
-
-        get_page(page);
-        vmf->page = page;
-
-    }
-    vmf->pte = pte_offset_map_lock(vmf->vma->vm_mm, vmf->pmd, vmf->address, &vmf->ptl);
-
-    set_pte_at(vmf->vma->vm_mm, vmf->address, vmf->pte, entry);
-    pte_unmap_unlock(vmf->pte, vmf->ptl);
+    result = dax_iomap_fault(vmf, PE_SIZE_PTE, &pfn, &error, &fomtierfs_iomap_ops);
 
     return result;
 }
@@ -55,6 +78,8 @@ static int fomtierfs_mmap(struct file *file, struct vm_area_struct *vma)
 {
     file_accessed(file); // TODO: probably don't need this
     vma->vm_ops = &fomtierfs_vm_ops;
+    pr_err("Bijan: vma flags: %lx\n", vma->vm_flags);
+    vma->vm_flags |= VM_MIXEDMAP | VM_HUGEPAGE;
 
     return 0;
 }
@@ -67,9 +92,8 @@ static unsigned long fomtierfs_mmu_get_unmapped_area(struct file *file,
 }
 
 const struct file_operations fomtierfs_file_operations = {
-	.read_iter	= generic_file_read_iter,
-	.write_iter	= generic_file_write_iter,
 	.mmap		= fomtierfs_mmap,
+    .mmap_supported_flags = MAP_SYNC,
 	.fsync		= noop_fsync,
 	.splice_read	= generic_file_splice_read,
 	.splice_write	= iter_file_splice_write,
@@ -82,6 +106,21 @@ const struct inode_operations fomtierfs_file_inode_operations = {
 	.getattr	= simple_getattr,
 };
 
+static int fomtierfs_writepages(struct address_space *mapping,
+                                struct writeback_control *wbc)
+{
+    struct fomtierfs_sb_info *sbi = mapping->host->i_sb->s_fs_info;
+
+    return dax_writeback_mapping_range(mapping, sbi->daxdev, wbc);
+}
+
+const struct address_space_operations fomtierfs_aops = {
+    .writepages = fomtierfs_writepages,
+    .direct_IO = noop_direct_IO,
+    .set_page_dirty = __set_page_dirty_no_writeback,
+    .invalidatepage = noop_invalidatepage,
+};
+
 struct inode *fomtierfs_get_inode(struct super_block *sb,
                 const struct inode *dir, umode_t mode, dev_t dev)
 {
@@ -92,10 +131,10 @@ struct inode *fomtierfs_get_inode(struct super_block *sb,
 
     inode->i_ino = get_next_ino();
     inode_init_owner(&init_user_ns, inode, dir, mode);
-    inode->i_mapping->a_ops = &ram_aops;
-    mapping_set_gfp_mask(inode->i_mapping, GFP_HIGHUSER);
-    mapping_set_unevictable(inode->i_mapping);
+    inode->i_mapping->a_ops = &fomtierfs_aops;
     inode->i_atime = inode->i_mtime = inode->i_ctime = current_time(inode);
+    inode->i_flags |= S_DAX;
+    pr_err("Bijan: Get Inode %x\n", inode->i_flags);
     switch (mode & S_IFMT) {
         case S_IFREG:
             inode->i_op = &fomtierfs_file_inode_operations;
@@ -190,21 +229,24 @@ const struct fs_parameter_spec fomtierfs_fs_parameters[] = {
     {}
 };
 
-static int fomtierfs_parse_param(struct fs_context *fc, struct fs_parameter *param)
-{
-    return 0;
-}
-
-static int fomtierfs_fill_super(struct super_block *sb, struct fs_context *fc)
+static int fomtierfs_fill_super(struct super_block *sb, void *data, int silent)
 {
     struct inode *inode;
+    struct dax_device *dax_dev = fs_dax_get_by_bdev(sb->s_bdev);
+    struct fomtierfs_sb_info *sbi = kzalloc(sizeof(struct fomtierfs_sb_info), GFP_KERNEL);
 
+    sbi->daxdev = dax_dev;
+
+    sb->s_fs_info = sbi;
     sb->s_maxbytes = MAX_LFS_FILESIZE;
     sb->s_blocksize = PAGE_SIZE;
     sb->s_blocksize_bits = PAGE_SHIFT;
     sb->s_magic = 0xDEADBEEF;
     sb->s_op = &fomtierfs_ops;
     sb->s_time_gran = 1;
+    if(!sb_set_blocksize(sb, PAGE_SIZE)) {
+        pr_err("FOMTierFS: error setting blocksize");
+    }
 
     inode = fomtierfs_get_inode(sb, NULL, S_IFDIR | 0777, 0);
     sb->s_root = d_make_root(inode);
@@ -214,24 +256,10 @@ static int fomtierfs_fill_super(struct super_block *sb, struct fs_context *fc)
     return 0;
 }
 
-static int fomtierfs_get_tree(struct fs_context *fc)
+static struct dentry *fomtierfs_mount(struct file_system_type *fs_type, int flags,
+                const char *dev_name, void *data)
 {
-    return get_tree_nodev(fc, fomtierfs_fill_super);
-}
-
-static void fomtierfs_free_fc(struct fs_context *fc) {}
-
-static const struct fs_context_operations fomtierfs_context_ops = {
-    .free = fomtierfs_free_fc,
-    .parse_param = fomtierfs_parse_param,
-    .get_tree = fomtierfs_get_tree,
-};
-
-int fomtierfs_init_fs_context(struct fs_context *fc)
-{
-    fc->s_fs_info = NULL;
-    fc->ops = &fomtierfs_context_ops;
-    return 0;
+    return mount_bdev(fs_type, flags, dev_name, data, fomtierfs_fill_super);
 }
 
 static void fomtierfs_kill_sb(struct super_block *sb)
@@ -240,11 +268,12 @@ static void fomtierfs_kill_sb(struct super_block *sb)
 }
 
 static struct file_system_type fomtierfs_fs_type = {
+    .owner = THIS_MODULE,
     .name = "FOMTierFS",
-    .init_fs_context = fomtierfs_init_fs_context,
+    .mount = fomtierfs_mount,
     .parameters = fomtierfs_fs_parameters,
     .kill_sb = fomtierfs_kill_sb,
-    .fs_flags = FS_USERNS_MOUNT,
+    .fs_flags = FS_USERNS_MOUNT | FS_REQUIRES_DEV,
 };
 
 int __init init_module(void)
