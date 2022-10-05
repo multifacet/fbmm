@@ -12,6 +12,7 @@
 #include <linux/iomap.h>
 #include <linux/dax.h>
 #include <linux/mman.h>
+#include <linux/statfs.h>
 
 // A lot of the boilerplate here is taken from the ramfs code
 
@@ -20,6 +21,8 @@ static const struct inode_operations fomtierfs_dir_inode_operations;
 
 struct fomtierfs_sb_info {
     struct dax_device *daxdev;
+    void* virt_addr; // Kernel's virtual address to dax device
+    u64 num_pages;
 };
 
 static int fomtierfs_iomap_begin(struct inode *inode, loff_t offset, loff_t length,
@@ -214,13 +217,29 @@ static const struct inode_operations fomtierfs_dir_inode_operations = {
 	.tmpfile	= fomtierfs_tmpfile,
 };
 
+static int fomtierfs_statfs(struct dentry *dentry, struct kstatfs *buf)
+{
+    struct super_block *sb = dentry->d_sb;
+    struct fomtierfs_sb_info *sbi = sb->s_fs_info;
+
+    buf->f_type = sb->s_magic;
+    buf->f_bsize = PAGE_SIZE;
+    buf->f_blocks = sbi->num_pages;
+    buf->f_bfree = buf->f_bavail = sbi->num_pages;
+    buf->f_files = LONG_MAX;
+    buf->f_ffree = LONG_MAX;
+    buf->f_namelen = 255;
+
+    return 0;
+}
+
 static int fomtierfs_show_options(struct seq_file *m, struct dentry *root)
 {
     return 0;
 }
 
 static const struct super_operations fomtierfs_ops = {
-	.statfs		= simple_statfs,
+	.statfs		= fomtierfs_statfs,
 	.drop_inode	= generic_delete_inode,
 	.show_options	= fomtierfs_show_options,
 };
@@ -234,8 +253,21 @@ static int fomtierfs_fill_super(struct super_block *sb, void *data, int silent)
     struct inode *inode;
     struct dax_device *dax_dev = fs_dax_get_by_bdev(sb->s_bdev);
     struct fomtierfs_sb_info *sbi = kzalloc(sizeof(struct fomtierfs_sb_info), GFP_KERNEL);
+    long num_pages;
+    void *virt_addr;
+    pfn_t _pfn;
+
+    // Determine how many pages are in the device
+    num_pages = dax_direct_access(dax_dev, 0, LONG_MAX / PAGE_SIZE,
+                    &virt_addr, &_pfn);
+
+    if (num_pages <= 0) {
+        pr_err("FOMTierFS: Determining device size failed");
+        return -EIO;
+    }
 
     sbi->daxdev = dax_dev;
+    sbi->num_pages = num_pages;
 
     sb->s_fs_info = sbi;
     sb->s_maxbytes = MAX_LFS_FILESIZE;
