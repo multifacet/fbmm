@@ -14,36 +14,76 @@
 #include <linux/mman.h>
 #include <linux/statfs.h>
 
+#include "fs.h"
+
 // A lot of the boilerplate here is taken from the ramfs code
 
 static const struct super_operations fomtierfs_ops;
 static const struct inode_operations fomtierfs_dir_inode_operations;
 
-struct fomtierfs_sb_info {
-    struct dax_device *daxdev;
-    void* virt_addr; // Kernel's virtual address to dax device
-    u64 num_pages;
-};
+struct fomtierfs_sb_info *FTFS_SB(struct super_block *sb)
+{
+    return sb->s_fs_info;
+}
+
+struct fomtierfs_inode_info *FTFS_I(struct inode *inode)
+{
+    return inode->i_private;
+}
 
 static int fomtierfs_iomap_begin(struct inode *inode, loff_t offset, loff_t length,
                 unsigned flags, struct iomap *iomap, struct iomap *srcmap)
 {
-    struct fomtierfs_sb_info *sb_info = inode->i_sb->s_fs_info;
-    static u64 paddr = 0;
+    struct fomtierfs_sb_info *sbi = FTFS_SB(inode->i_sb);
+    struct fomtierfs_inode_info *inode_info = FTFS_I(inode);
+    struct fomtierfs_page_map *mapping;
+    struct fomtierfs_page *page;
+    u64 page_offset;
+    u64 page_shift;
+
+    page_shift = inode->i_sb->s_blocksize_bits;
+    // Calculate the "page" the offset belongs to
+    page_offset = offset >> page_shift;
 
     iomap->flags = 0;
     iomap->bdev = inode->i_sb->s_bdev;
-    iomap->dax_dev = sb_info->daxdev;
+    iomap->dax_dev = sbi->daxdev;
     iomap->offset = offset;
     iomap->length = length;
-    if (paddr > offset) {
-        iomap->type = IOMAP_MAPPED;
-        iomap->addr = offset;
-    } else {
+
+    mapping = fomtierfs_find_map(&inode_info->page_maps, page_offset);
+
+    if (!mapping) {
+        mapping = kzalloc(sizeof(struct fomtierfs_page_map), GFP_KERNEL);
+        if (!mapping) {
+            pr_err("FOMTierFS: Error allocating new mapping");
+            return -ENOMEM;
+        }
+
+        // A mapping does not exist for this offset, so allocate one from the free list.
+        if (list_empty(&sbi->free_list)) {
+            pr_err("FOMTierFS: No more entries in the free list");
+            kfree(mapping);
+            return -ENOMEM;
+        }
+        page = list_first_entry(&sbi->free_list, struct fomtierfs_page, list);
+        list_del(&page->list);
+        sbi->free_pages--;
+
+        // Save this new mapping
+        mapping->page_offset = page_offset;
+        mapping->page = page;
+        if (!fomtierfs_insert_mapping(&inode_info->page_maps, mapping)) {
+            BUG();
+        }
+
         iomap->flags |= IOMAP_F_NEW;
         iomap->type = IOMAP_MAPPED;
-        iomap->addr = paddr;
-        paddr += length;
+        iomap->addr = page->page_num << page_shift;
+    } else {
+        // There is already a page allocated for this offset, so just use that
+        iomap->type = IOMAP_MAPPED;
+        iomap->addr = mapping->page->page_num << page_shift;
     }
 
     return 0;
@@ -81,7 +121,6 @@ static int fomtierfs_mmap(struct file *file, struct vm_area_struct *vma)
 {
     file_accessed(file); // TODO: probably don't need this
     vma->vm_ops = &fomtierfs_vm_ops;
-    pr_err("Bijan: vma flags: %lx\n", vma->vm_flags);
     vma->vm_flags |= VM_MIXEDMAP | VM_HUGEPAGE;
 
     return 0;
@@ -112,7 +151,7 @@ const struct inode_operations fomtierfs_file_inode_operations = {
 static int fomtierfs_writepages(struct address_space *mapping,
                                 struct writeback_control *wbc)
 {
-    struct fomtierfs_sb_info *sbi = mapping->host->i_sb->s_fs_info;
+    struct fomtierfs_sb_info *sbi = FTFS_SB(mapping->host->i_sb);
 
     return dax_writeback_mapping_range(mapping, sbi->daxdev, wbc);
 }
@@ -128,16 +167,24 @@ struct inode *fomtierfs_get_inode(struct super_block *sb,
                 const struct inode *dir, umode_t mode, dev_t dev)
 {
     struct inode *inode = new_inode(sb);
+    struct fomtierfs_inode_info *info;
 
     if (!inode)
         return NULL;
+
+    info = kzalloc(sizeof(struct fomtierfs_inode_info), GFP_KERNEL);
+    if (!info) {
+        pr_err("FOMTierFS: Failure allocating FOMTierFS inode");
+        return NULL;
+    }
+    info->page_maps = RB_ROOT;
 
     inode->i_ino = get_next_ino();
     inode_init_owner(&init_user_ns, inode, dir, mode);
     inode->i_mapping->a_ops = &fomtierfs_aops;
     inode->i_atime = inode->i_mtime = inode->i_ctime = current_time(inode);
     inode->i_flags |= S_DAX;
-    pr_err("Bijan: Get Inode %x\n", inode->i_flags);
+    inode->i_private = info;
     switch (mode & S_IFMT) {
         case S_IFREG:
             inode->i_op = &fomtierfs_file_inode_operations;
@@ -220,17 +267,39 @@ static const struct inode_operations fomtierfs_dir_inode_operations = {
 static int fomtierfs_statfs(struct dentry *dentry, struct kstatfs *buf)
 {
     struct super_block *sb = dentry->d_sb;
-    struct fomtierfs_sb_info *sbi = sb->s_fs_info;
+    struct fomtierfs_sb_info *sbi = FTFS_SB(sb);
 
     buf->f_type = sb->s_magic;
     buf->f_bsize = PAGE_SIZE;
     buf->f_blocks = sbi->num_pages;
-    buf->f_bfree = buf->f_bavail = sbi->num_pages;
+    buf->f_bfree = buf->f_bavail = sbi->free_pages;
     buf->f_files = LONG_MAX;
     buf->f_ffree = LONG_MAX;
     buf->f_namelen = 255;
 
     return 0;
+}
+
+static void fomtierfs_free_inode(struct inode *inode) {
+    struct fomtierfs_sb_info *sbi = FTFS_SB(inode->i_sb);
+    struct fomtierfs_inode_info *inode_info = FTFS_I(inode);
+    struct rb_node *node = inode_info->page_maps.rb_node;
+    struct fomtierfs_page_map *mapping;
+
+    // Free each mapping in the inode, and place each page back into the free list
+    while (node) {
+        mapping = container_of(node, struct fomtierfs_page_map, node);
+
+        rb_erase(node, &inode_info->page_maps);
+
+        list_add_tail(&mapping->page->list, &sbi->free_list);
+        sbi->free_pages++;
+
+        kfree(mapping);
+
+        node = inode_info->page_maps.rb_node;
+    }
+
 }
 
 static int fomtierfs_show_options(struct seq_file *m, struct dentry *root)
@@ -240,6 +309,7 @@ static int fomtierfs_show_options(struct seq_file *m, struct dentry *root)
 
 static const struct super_operations fomtierfs_ops = {
 	.statfs		= fomtierfs_statfs,
+    .free_inode = fomtierfs_free_inode,
 	.drop_inode	= generic_delete_inode,
 	.show_options	= fomtierfs_show_options,
 };
@@ -247,6 +317,42 @@ static const struct super_operations fomtierfs_ops = {
 const struct fs_parameter_spec fomtierfs_fs_parameters[] = {
     {}
 };
+
+static int fomtierfs_populate_free_list(struct fomtierfs_sb_info *sbi, long num_pages)
+{
+    int ret = 0;
+    long i;
+    struct fomtierfs_page *tmp;
+
+    INIT_LIST_HEAD(&sbi->free_list);
+    for (i = 0; i < num_pages; i++) {
+        struct fomtierfs_page *page = kzalloc(sizeof(struct fomtierfs_page), GFP_KERNEL);
+        if (!page) {
+            ret = -ENOMEM;
+            goto err;
+        }
+
+        page->page_num = i;
+        list_add(&page->list, &sbi->free_list);
+    }
+
+    i = 0;
+    list_for_each_entry(tmp, &sbi->free_list, list) {
+        i++;
+    }
+
+    return 0;
+
+err:
+    // Free all of the entries we've put in the list so far
+    struct fomtierfs_page *cursor, *temp;
+    list_for_each_entry_safe(cursor, temp, &sbi->free_list, list) {
+        list_del(&cursor->list);
+        kfree(cursor);
+    }
+
+    return ret;
+}
 
 static int fomtierfs_fill_super(struct super_block *sb, void *data, int silent)
 {
@@ -256,6 +362,7 @@ static int fomtierfs_fill_super(struct super_block *sb, void *data, int silent)
     long num_pages;
     void *virt_addr;
     pfn_t _pfn;
+    int ret;
 
     // Determine how many pages are in the device
     num_pages = dax_direct_access(dax_dev, 0, LONG_MAX / PAGE_SIZE,
@@ -268,6 +375,7 @@ static int fomtierfs_fill_super(struct super_block *sb, void *data, int silent)
 
     sbi->daxdev = dax_dev;
     sbi->num_pages = num_pages;
+    sbi->free_pages = num_pages;
 
     sb->s_fs_info = sbi;
     sb->s_maxbytes = MAX_LFS_FILESIZE;
@@ -278,6 +386,13 @@ static int fomtierfs_fill_super(struct super_block *sb, void *data, int silent)
     sb->s_time_gran = 1;
     if(!sb_set_blocksize(sb, PAGE_SIZE)) {
         pr_err("FOMTierFS: error setting blocksize");
+    }
+
+    // Populate the
+    ret = fomtierfs_populate_free_list(sbi, num_pages);
+    if (ret != 0) {
+        pr_err("FOMTierFS: Error populating free list");
+        return ret;
     }
 
     inode = fomtierfs_get_inode(sb, NULL, S_IFDIR | 0777, 0);
