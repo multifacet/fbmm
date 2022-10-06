@@ -1,4 +1,5 @@
-obj-m += fs.o
+obj-m += fomtierfs.o
+fomtierfs-y += fs.o fomtierfs_rb.o
 
 all:
 	make -C ../kbuild M=$(PWD) modules
