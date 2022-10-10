@@ -13,6 +13,7 @@
 #include <linux/dax.h>
 #include <linux/mman.h>
 #include <linux/statfs.h>
+#include <linux/kobject.h>
 
 #include "fs.h"
 
@@ -20,6 +21,9 @@
 
 static const struct super_operations fomtierfs_ops;
 static const struct inode_operations fomtierfs_dir_inode_operations;
+
+// This is a copy of the sb_info struct. It should only be used in sysfs files
+static struct fomtierfs_sb_info *sysfs_sb_info = NULL;
 
 struct fomtierfs_sb_info *FTFS_SB(struct super_block *sb)
 {
@@ -36,6 +40,7 @@ static int fomtierfs_iomap_begin(struct inode *inode, loff_t offset, loff_t leng
 {
     struct fomtierfs_sb_info *sbi = FTFS_SB(inode->i_sb);
     struct fomtierfs_inode_info *inode_info = FTFS_I(inode);
+    struct fomtierfs_dev_info *prim, *sec;
     struct fomtierfs_page_map *mapping;
     struct fomtierfs_page *page;
     u64 page_offset;
@@ -46,8 +51,6 @@ static int fomtierfs_iomap_begin(struct inode *inode, loff_t offset, loff_t leng
     page_offset = offset >> page_shift;
 
     iomap->flags = 0;
-    iomap->bdev = inode->i_sb->s_bdev;
-    iomap->dax_dev = sbi->daxdev;
     iomap->offset = offset;
     iomap->length = length;
 
@@ -60,15 +63,29 @@ static int fomtierfs_iomap_begin(struct inode *inode, loff_t offset, loff_t leng
             return -ENOMEM;
         }
 
-        // A mapping does not exist for this offset, so allocate one from the free list.
-        if (list_empty(&sbi->free_list)) {
-            pr_err("FOMTierFS: No more entries in the free list");
-            kfree(mapping);
-            return -ENOMEM;
+        // Decide which device to allocate from
+        if (sbi->alloc_fast) {
+            prim = &sbi->mem[FAST_MEM];
+            sec = &sbi->mem[SLOW_MEM];
+        } else {
+            prim = &sbi->mem[SLOW_MEM];
+            sec = &sbi->mem[FAST_MEM];
         }
-        page = list_first_entry(&sbi->free_list, struct fomtierfs_page, list);
+        sbi->alloc_fast = !sbi->alloc_fast;
+
+        // A mapping does not exist for this offset, so allocate one from the free list.
+        if (list_empty(&prim->free_list)) {
+            if (!list_empty(&sec->free_list)) {
+                prim = sec;
+            } else {
+                pr_err("FOMTierFS: No more entries in the free list");
+                kfree(mapping);
+                return -ENOMEM;
+            }
+        }
+        page = list_first_entry(&prim->free_list, struct fomtierfs_page, list);
         list_del(&page->list);
-        sbi->free_pages--;
+        prim->free_pages--;
 
         // Save this new mapping
         mapping->page_offset = page_offset;
@@ -80,10 +97,14 @@ static int fomtierfs_iomap_begin(struct inode *inode, loff_t offset, loff_t leng
         iomap->flags |= IOMAP_F_NEW;
         iomap->type = IOMAP_MAPPED;
         iomap->addr = page->page_num << page_shift;
+        iomap->bdev = prim->bdev;
+        iomap->dax_dev = prim->daxdev;
     } else {
         // There is already a page allocated for this offset, so just use that
         iomap->type = IOMAP_MAPPED;
         iomap->addr = mapping->page->page_num << page_shift;
+        iomap->bdev = sbi->mem[mapping->page->type].bdev;
+        iomap->dax_dev = sbi->mem[mapping->page->type].daxdev;
     }
 
     return 0;
@@ -148,16 +169,7 @@ const struct inode_operations fomtierfs_file_inode_operations = {
 	.getattr	= simple_getattr,
 };
 
-static int fomtierfs_writepages(struct address_space *mapping,
-                                struct writeback_control *wbc)
-{
-    struct fomtierfs_sb_info *sbi = FTFS_SB(mapping->host->i_sb);
-
-    return dax_writeback_mapping_range(mapping, sbi->daxdev, wbc);
-}
-
 const struct address_space_operations fomtierfs_aops = {
-    .writepages = fomtierfs_writepages,
     .direct_IO = noop_direct_IO,
     .set_page_dirty = __set_page_dirty_no_writeback,
     .invalidatepage = noop_invalidatepage,
@@ -271,8 +283,8 @@ static int fomtierfs_statfs(struct dentry *dentry, struct kstatfs *buf)
 
     buf->f_type = sb->s_magic;
     buf->f_bsize = PAGE_SIZE;
-    buf->f_blocks = sbi->num_pages;
-    buf->f_bfree = buf->f_bavail = sbi->free_pages;
+    buf->f_blocks = sbi->mem[FAST_MEM].num_pages + sbi->mem[SLOW_MEM].num_pages;
+    buf->f_bfree = buf->f_bavail = sbi->mem[FAST_MEM].free_pages + sbi->mem[SLOW_MEM].num_pages;
     buf->f_files = LONG_MAX;
     buf->f_ffree = LONG_MAX;
     buf->f_namelen = 255;
@@ -285,6 +297,7 @@ static void fomtierfs_free_inode(struct inode *inode) {
     struct fomtierfs_inode_info *inode_info = FTFS_I(inode);
     struct rb_node *node = inode_info->page_maps.rb_node;
     struct fomtierfs_page_map *mapping;
+    struct fomtierfs_page *page;
 
     // Free each mapping in the inode, and place each page back into the free list
     while (node) {
@@ -292,8 +305,10 @@ static void fomtierfs_free_inode(struct inode *inode) {
 
         rb_erase(node, &inode_info->page_maps);
 
-        list_add_tail(&mapping->page->list, &sbi->free_list);
-        sbi->free_pages++;
+        page = mapping->page;
+
+        list_add_tail(&page->list, &sbi->mem[page->type].free_list);
+        sbi->mem[page->type].free_pages++;
 
         kfree(mapping);
 
@@ -314,17 +329,72 @@ static const struct super_operations fomtierfs_ops = {
 	.show_options	= fomtierfs_show_options,
 };
 
-const struct fs_parameter_spec fomtierfs_fs_parameters[] = {
-    {}
+enum fomtierfs_param {
+    Opt_slowmem, Opt_source
 };
 
-static int fomtierfs_populate_free_list(struct fomtierfs_sb_info *sbi, long num_pages)
+const struct fs_parameter_spec fomtierfs_fs_parameters[] = {
+    fsparam_string("slowmem", Opt_slowmem),
+    fsparam_string("source", Opt_source),
+    {},
+};
+
+static int fomtierfs_parse_param(struct fs_context *fc, struct fs_parameter *param)
+{
+    struct fs_parse_result result;
+    int opt;
+
+    opt = fs_parse(fc, fomtierfs_fs_parameters, param, &result);
+	if (opt < 0) {
+		/*
+		 * We might like to report bad mount options here;
+		 * but traditionally ramfs has ignored all mount options,
+		 * and as it is used as a !CONFIG_SHMEM simple substitute
+		 * for tmpfs, better continue to ignore other mount options.
+		 */
+		if (opt == -ENOPARAM)
+			opt = 0;
+		return opt;
+	}
+
+    switch(opt) {
+    case Opt_slowmem:
+        fc->fs_private = kstrdup(param->string, GFP_KERNEL);
+        break;
+    case Opt_source:
+        fc->source = kstrdup(param->string, GFP_KERNEL);
+        break;
+    default:
+        pr_err("FOMTierFS: unrecognized option %s", param->key);
+        break;
+    }
+
+    return 0;
+}
+
+static int fomtierfs_populate_dev_info(struct fomtierfs_dev_info *di, struct block_device *bdev, enum fomtierfs_mem_type type)
 {
     int ret = 0;
     long i;
+    long num_pages;
+    pfn_t _pfn;
     struct fomtierfs_page *tmp;
 
-    INIT_LIST_HEAD(&sbi->free_list);
+    di->bdev = bdev;
+    di->daxdev = fs_dax_get_by_bdev(bdev);
+
+    // Determine how many pages are in the device
+    num_pages = dax_direct_access(di->daxdev, 0, LONG_MAX / PAGE_SIZE,
+                    &di->virt_addr, &_pfn);
+    if (num_pages <= 0) {
+        pr_err("FOMTierFS: Determining device size failed");
+        return -EIO;
+    }
+
+    di->num_pages = num_pages;
+    di->free_pages = num_pages;
+
+    INIT_LIST_HEAD(&di->free_list);
     for (i = 0; i < num_pages; i++) {
         struct fomtierfs_page *page = kzalloc(sizeof(struct fomtierfs_page), GFP_KERNEL);
         if (!page) {
@@ -333,11 +403,12 @@ static int fomtierfs_populate_free_list(struct fomtierfs_sb_info *sbi, long num_
         }
 
         page->page_num = i;
-        list_add(&page->list, &sbi->free_list);
+        page->type = type;
+        list_add(&page->list, &di->free_list);
     }
 
     i = 0;
-    list_for_each_entry(tmp, &sbi->free_list, list) {
+    list_for_each_entry(tmp, &di->free_list, list) {
         i++;
     }
 
@@ -346,7 +417,7 @@ static int fomtierfs_populate_free_list(struct fomtierfs_sb_info *sbi, long num_
 err:
     // Free all of the entries we've put in the list so far
     struct fomtierfs_page *cursor, *temp;
-    list_for_each_entry_safe(cursor, temp, &sbi->free_list, list) {
+    list_for_each_entry_safe(cursor, temp, &di->free_list, list) {
         list_del(&cursor->list);
         kfree(cursor);
     }
@@ -354,28 +425,13 @@ err:
     return ret;
 }
 
-static int fomtierfs_fill_super(struct super_block *sb, void *data, int silent)
+static int fomtierfs_fill_super(struct super_block *sb, struct fs_context *fc)
 {
     struct inode *inode;
-    struct dax_device *dax_dev = fs_dax_get_by_bdev(sb->s_bdev);
+    struct block_device *slow_dev;
     struct fomtierfs_sb_info *sbi = kzalloc(sizeof(struct fomtierfs_sb_info), GFP_KERNEL);
-    long num_pages;
-    void *virt_addr;
-    pfn_t _pfn;
+    char *slow_dev_name = fc->fs_private;
     int ret;
-
-    // Determine how many pages are in the device
-    num_pages = dax_direct_access(dax_dev, 0, LONG_MAX / PAGE_SIZE,
-                    &virt_addr, &_pfn);
-
-    if (num_pages <= 0) {
-        pr_err("FOMTierFS: Determining device size failed");
-        return -EIO;
-    }
-
-    sbi->daxdev = dax_dev;
-    sbi->num_pages = num_pages;
-    sbi->free_pages = num_pages;
 
     sb->s_fs_info = sbi;
     sb->s_maxbytes = MAX_LFS_FILESIZE;
@@ -388,25 +444,61 @@ static int fomtierfs_fill_super(struct super_block *sb, void *data, int silent)
         pr_err("FOMTierFS: error setting blocksize");
     }
 
-    // Populate the
-    ret = fomtierfs_populate_free_list(sbi, num_pages);
+    // Populate the device information for the fast and slow mem
+    ret = fomtierfs_populate_dev_info(&sbi->mem[FAST_MEM], sb->s_bdev, FAST_MEM);
     if (ret != 0) {
-        pr_err("FOMTierFS: Error populating free list");
+        pr_err("FOMTierFS: Error populating fast mem device information");
+        kfree(sbi);
+        return ret;
+    }
+
+    slow_dev = blkdev_get_by_path(slow_dev_name, FMODE_READ|FMODE_WRITE|FMODE_EXCL, sbi);
+    if (IS_ERR(slow_dev)) {
+        ret = PTR_ERR(slow_dev);
+        pr_err("FOMTierFS: Error opening slow mem device %s %d", slow_dev_name, ret);
+        kfree(sbi);
+        return ret;
+    }
+    ret = fomtierfs_populate_dev_info(&sbi->mem[SLOW_MEM], slow_dev, SLOW_MEM);
+    if (ret != 0) {
+        pr_err("FOMTierFS: Error populating slow mem device information");
+        kfree(sbi);
         return ret;
     }
 
     inode = fomtierfs_get_inode(sb, NULL, S_IFDIR | 0777, 0);
     sb->s_root = d_make_root(inode);
-    if (!sb->s_root)
+    if (!sb->s_root) {
+        kfree(sbi);
         return -ENOMEM;
+    }
+
+    sbi->alloc_fast = true;
+    fc->s_fs_info = sbi;
+    sysfs_sb_info = sbi;
 
     return 0;
 }
 
-static struct dentry *fomtierfs_mount(struct file_system_type *fs_type, int flags,
-                const char *dev_name, void *data)
+static int fomtierfs_get_tree(struct fs_context *fc)
 {
-    return mount_bdev(fs_type, flags, dev_name, data, fomtierfs_fill_super);
+    return get_tree_bdev(fc, fomtierfs_fill_super);
+}
+
+static void fomtierfs_free_fc(struct fs_context *fc)
+{
+}
+
+static const struct fs_context_operations fomtierfs_context_ops = {
+	.free		= fomtierfs_free_fc,
+	.parse_param	= fomtierfs_parse_param,
+	.get_tree	= fomtierfs_get_tree,
+};
+
+int fomtierfs_init_fs_context(struct fs_context *fc)
+{
+    fc->ops = &fomtierfs_context_ops;
+    return 0;
 }
 
 static void fomtierfs_kill_sb(struct super_block *sb)
@@ -417,16 +509,66 @@ static void fomtierfs_kill_sb(struct super_block *sb)
 static struct file_system_type fomtierfs_fs_type = {
     .owner = THIS_MODULE,
     .name = "FOMTierFS",
-    .mount = fomtierfs_mount,
+    .init_fs_context = fomtierfs_init_fs_context,
     .parameters = fomtierfs_fs_parameters,
     .kill_sb = fomtierfs_kill_sb,
     .fs_flags = FS_USERNS_MOUNT | FS_REQUIRES_DEV,
 };
 
+static ssize_t usage_show(struct kobject *kobj,
+        struct kobj_attribute *attr, char *buf)
+{
+    if (sysfs_sb_info) {
+        return sprintf(buf,
+            "fast total: %lld\tfree: %lld\n"
+            "slow total: %lld\tfree: %lld\n",
+            sysfs_sb_info->mem[FAST_MEM].num_pages,
+            sysfs_sb_info->mem[FAST_MEM].free_pages,
+            sysfs_sb_info->mem[SLOW_MEM].num_pages,
+            sysfs_sb_info->mem[SLOW_MEM].free_pages);
+    } else {
+        return sprintf(buf, "Not mounted");
+    }
+}
+
+static ssize_t usage_store(struct kobject *kobj,
+        struct kobj_attribute *attr,
+        const char *buf, size_t count)
+{
+    return -EINVAL;
+}
+static struct kobj_attribute usage_attr =
+__ATTR(stats, 0444, usage_show, usage_store);
+
+static struct attribute *fomtierfs_attr[] = {
+    &usage_attr.attr,
+    NULL,
+};
+
+static const struct attribute_group fomtierfs_attr_group = {
+    .attrs = fomtierfs_attr,
+};
+
 int __init init_module(void)
 {
+    struct kobject *fomtierfs_kobj;
+    int err;
+
     printk(KERN_INFO "Starting FOMTierFS");
     register_filesystem(&fomtierfs_fs_type);
+
+    fomtierfs_kobj = kobject_create_and_add("fomtierfs", fs_kobj);
+    if (unlikely(!fomtierfs_kobj)) {
+        pr_err("Failed to create fomtierfs kobj\n");
+        return -ENOMEM;
+    }
+
+    err = sysfs_create_group(fomtierfs_kobj, &fomtierfs_attr_group);
+    if (err) {
+        pr_err("Failed to register fomtierfs group\n");
+        kobject_put(fomtierfs_kobj);
+        return err;
+    }
     return 0;
 }
 

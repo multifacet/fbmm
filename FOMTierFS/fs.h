@@ -5,8 +5,14 @@
 #include <linux/fs.h>
 #include <linux/rbtree.h>
 
+enum fomtierfs_mem_type {
+    FAST_MEM = 0,
+    SLOW_MEM = 1,
+};
+
 struct fomtierfs_page {
     u64 page_num;
+    enum fomtierfs_mem_type type;
     struct list_head list;
 };
 
@@ -16,12 +22,18 @@ struct fomtierfs_page_map {
     struct rb_node node;
 };
 
-struct fomtierfs_sb_info {
+struct fomtierfs_dev_info {
+    struct block_device *bdev;
     struct dax_device *daxdev;
     void* virt_addr; // Kernel's virtual address to dax device
     struct list_head free_list;
     u64 num_pages;
     u64 free_pages;
+};
+
+struct fomtierfs_sb_info {
+    struct fomtierfs_dev_info mem[2];
+    bool alloc_fast;
 };
 
 struct fomtierfs_inode_info {
