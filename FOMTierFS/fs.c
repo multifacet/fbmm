@@ -518,6 +518,8 @@ static struct file_system_type fomtierfs_fs_type = {
 static ssize_t usage_show(struct kobject *kobj,
         struct kobj_attribute *attr, char *buf)
 {
+    // I'd prefet to tie the sb info to the sysfs file, but I can't find a way to do that,
+    // so I'm just using a cached pointer to it in a global variable
     if (sysfs_sb_info) {
         return sprintf(buf,
             "fast total: %lld\tfree: %lld\n"
