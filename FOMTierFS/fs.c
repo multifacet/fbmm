@@ -379,6 +379,7 @@ static int fomtierfs_populate_dev_info(struct fomtierfs_dev_info *di, struct blo
     long num_pages;
     pfn_t _pfn;
     struct fomtierfs_page *tmp;
+    struct fomtierfs_page *cursor, *temp;
 
     di->bdev = bdev;
     di->daxdev = fs_dax_get_by_bdev(bdev);
@@ -416,7 +417,6 @@ static int fomtierfs_populate_dev_info(struct fomtierfs_dev_info *di, struct blo
 
 err:
     // Free all of the entries we've put in the list so far
-    struct fomtierfs_page *cursor, *temp;
     list_for_each_entry_safe(cursor, temp, &di->free_list, list) {
         list_del(&cursor->list);
         kfree(cursor);
