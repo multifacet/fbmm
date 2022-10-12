@@ -35,12 +35,42 @@ struct fomtierfs_inode_info *FTFS_I(struct inode *inode)
     return inode->i_private;
 }
 
+struct fomtierfs_page *fomtierfs_alloc_page(struct fomtierfs_sb_info *sbi)
+{
+    struct fomtierfs_page *page;
+    struct fomtierfs_dev_info *prim, *sec;
+
+    // Decide which device to allocate from
+    if (sbi->alloc_fast) {
+        prim = &sbi->mem[FAST_MEM];
+        sec = &sbi->mem[SLOW_MEM];
+    } else {
+        prim = &sbi->mem[SLOW_MEM];
+        sec = &sbi->mem[FAST_MEM];
+    }
+    sbi->alloc_fast = !sbi->alloc_fast;
+
+    // Try to allocate from the desired free list, otherwise try the other
+    if (list_empty(&prim->free_list)) {
+        if (!list_empty(&sec->free_list)) {
+            prim = sec;
+        } else {
+            pr_err("FOMTierFS: No more entries in the free list");
+            return NULL;
+        }
+    }
+    page = list_first_entry(&prim->free_list, struct fomtierfs_page, list);
+    list_del(&page->list);
+    prim->free_pages--;
+
+    return page;
+}
+
 static int fomtierfs_iomap_begin(struct inode *inode, loff_t offset, loff_t length,
                 unsigned flags, struct iomap *iomap, struct iomap *srcmap)
 {
     struct fomtierfs_sb_info *sbi = FTFS_SB(inode->i_sb);
     struct fomtierfs_inode_info *inode_info = FTFS_I(inode);
-    struct fomtierfs_dev_info *prim, *sec;
     struct fomtierfs_page_map *mapping;
     struct fomtierfs_page *page;
     u64 page_offset;
@@ -63,29 +93,11 @@ static int fomtierfs_iomap_begin(struct inode *inode, loff_t offset, loff_t leng
             return -ENOMEM;
         }
 
-        // Decide which device to allocate from
-        if (sbi->alloc_fast) {
-            prim = &sbi->mem[FAST_MEM];
-            sec = &sbi->mem[SLOW_MEM];
-        } else {
-            prim = &sbi->mem[SLOW_MEM];
-            sec = &sbi->mem[FAST_MEM];
+        page = fomtierfs_alloc_page(sbi);
+        if (!page) {
+            kfree(mapping);
+            return -ENOMEM;
         }
-        sbi->alloc_fast = !sbi->alloc_fast;
-
-        // A mapping does not exist for this offset, so allocate one from the free list.
-        if (list_empty(&prim->free_list)) {
-            if (!list_empty(&sec->free_list)) {
-                prim = sec;
-            } else {
-                pr_err("FOMTierFS: No more entries in the free list");
-                kfree(mapping);
-                return -ENOMEM;
-            }
-        }
-        page = list_first_entry(&prim->free_list, struct fomtierfs_page, list);
-        list_del(&page->list);
-        prim->free_pages--;
 
         // Save this new mapping
         mapping->page_offset = page_offset;
@@ -97,14 +109,15 @@ static int fomtierfs_iomap_begin(struct inode *inode, loff_t offset, loff_t leng
         iomap->flags |= IOMAP_F_NEW;
         iomap->type = IOMAP_MAPPED;
         iomap->addr = page->page_num << page_shift;
-        iomap->bdev = prim->bdev;
-        iomap->dax_dev = prim->daxdev;
+        iomap->bdev = sbi->mem[page->type].bdev;
+        iomap->dax_dev = sbi->mem[page->type].daxdev;
     } else {
         // There is already a page allocated for this offset, so just use that
+        page = mapping->page;
         iomap->type = IOMAP_MAPPED;
-        iomap->addr = mapping->page->page_num << page_shift;
-        iomap->bdev = sbi->mem[mapping->page->type].bdev;
-        iomap->dax_dev = sbi->mem[mapping->page->type].daxdev;
+        iomap->addr = page->page_num << page_shift;
+        iomap->bdev = sbi->mem[page->type].bdev;
+        iomap->dax_dev = sbi->mem[page->type].daxdev;
     }
 
     return 0;
@@ -154,14 +167,56 @@ static unsigned long fomtierfs_mmu_get_unmapped_area(struct file *file,
 	return current->mm->get_unmapped_area(file, addr, len, pgoff, flags);
 }
 
+static long fomtierfs_fallocate(struct file *file, int mode, loff_t offset, loff_t len)
+{
+    struct inode *inode = file_inode(file);
+    struct fomtierfs_sb_info *sbi = FTFS_SB(inode->i_sb);
+    struct fomtierfs_inode_info *inode_info = FTFS_I(inode);
+    struct fomtierfs_page_map *mapping;
+    struct fomtierfs_page *page;
+    loff_t off;
+    long error;
+
+    if (mode != 0)
+        return -EOPNOTSUPP;
+
+    error = vfs_truncate(&file->f_path, len);
+    if (error)
+        return error;
+
+    // Allocate and add mappings for the desired range
+    for (off = offset; off < offset + len; off += PAGE_SIZE) {
+        mapping = kzalloc(sizeof(struct fomtierfs_page_map), GFP_KERNEL);
+        if (!mapping) {
+            pr_err("FOMTierFS: fallocate: Error allocating new mapping");
+            return -ENOMEM;
+        }
+
+        page = fomtierfs_alloc_page(sbi);
+        if (!page) {
+            kfree(mapping);
+            return -ENOMEM;
+        }
+
+        mapping->page_offset = off;
+        mapping->page = page;
+        if (!fomtierfs_insert_mapping(&inode_info->page_maps, mapping)) {
+            BUG();
+        }
+    }
+
+    return 0;
+}
+
 const struct file_operations fomtierfs_file_operations = {
-	.mmap		= fomtierfs_mmap,
+    .mmap		= fomtierfs_mmap,
     .mmap_supported_flags = MAP_SYNC,
-	.fsync		= noop_fsync,
-	.splice_read	= generic_file_splice_read,
-	.splice_write	= iter_file_splice_write,
-	.llseek		= generic_file_llseek,
-	.get_unmapped_area	= fomtierfs_mmu_get_unmapped_area,
+    .fsync		= noop_fsync,
+    .splice_read	= generic_file_splice_read,
+    .splice_write	= iter_file_splice_write,
+    .llseek		= generic_file_llseek,
+    .get_unmapped_area	= fomtierfs_mmu_get_unmapped_area,
+    .fallocate = fomtierfs_fallocate,
 };
 
 const struct inode_operations fomtierfs_file_inode_operations = {
