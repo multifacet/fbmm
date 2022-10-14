@@ -198,7 +198,7 @@ static long fomtierfs_fallocate(struct file *file, int mode, loff_t offset, loff
             return -ENOMEM;
         }
 
-        mapping->page_offset = off;
+        mapping->page_offset = off >> PAGE_SHIFT;
         mapping->page = page;
         if (!fomtierfs_insert_mapping(&inode_info->page_maps, mapping)) {
             BUG();
