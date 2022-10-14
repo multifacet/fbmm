@@ -63,6 +63,8 @@ struct fomtierfs_page *fomtierfs_alloc_page(struct fomtierfs_sb_info *sbi)
     list_del(&page->list);
     prim->free_pages--;
 
+    clear_page(prim->virt_addr + (page->page_num << PAGE_SHIFT));
+
     return page;
 }
 
