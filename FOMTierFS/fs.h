@@ -4,6 +4,7 @@
 #include <linux/types.h>
 #include <linux/fs.h>
 #include <linux/rbtree.h>
+#include <linux/spinlock.h>
 
 enum fomtierfs_mem_type {
     FAST_MEM = 0,
@@ -29,6 +30,7 @@ struct fomtierfs_dev_info {
     struct list_head free_list;
     u64 num_pages;
     u64 free_pages;
+    spinlock_t lock;
 };
 
 struct fomtierfs_sb_info {
@@ -38,6 +40,7 @@ struct fomtierfs_sb_info {
 
 struct fomtierfs_inode_info {
     struct rb_root page_maps; // Mapping of offset page to dax page
+    rwlock_t map_lock;
 };
 
 struct fomtierfs_sb_info *FTFS_SB(struct super_block *sb);
