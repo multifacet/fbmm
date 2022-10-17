@@ -1,7 +1,8 @@
 #include "fs.h"
 
 /*
- * Search a mapping tree for the file offset->page mapping given a file offset
+ * Search a mapping tree for the file offset->page mapping given a file offset.
+ * fomtierfs_inode_info->map_lock should be held in read mode.
  * @root The root of the rb tree to search
  * @offset The page offset to look for
  *
@@ -27,6 +28,7 @@ struct fomtierfs_page_map *fomtierfs_find_map(struct rb_root *root, u64 offset)
 
 /*
  * Insert a new mapping into a mapping tree
+ * fomtierfs_inode_info->map_lock should be held in write mode.
  * @root The root of the rb tree to insert into
  * @map The mapping to insert into the tree
  *
