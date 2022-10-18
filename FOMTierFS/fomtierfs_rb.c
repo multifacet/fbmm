@@ -1,19 +1,19 @@
 #include "fs.h"
 
 /*
- * Search a mapping tree for the file offset->page mapping given a file offset.
+ * Search a page tree for the fomtierfs_page mapped to the given a file offset.
  * fomtierfs_inode_info->map_lock should be held in read mode.
  * @root The root of the rb tree to search
  * @offset The page offset to look for
  *
- * Returns NULL if the mapping is not found and the corresponding mapping if found.
+ * Returns NULL if the page is not found and the corresponding page if found.
  */
-struct fomtierfs_page_map *fomtierfs_find_map(struct rb_root *root, u64 offset)
+struct fomtierfs_page *fomtierfs_find_page(struct rb_root *root, u64 offset)
 {
     struct rb_node *node = root->rb_node;
 
     while (node) {
-        struct fomtierfs_page_map *data = container_of(node, struct fomtierfs_page_map, node);
+        struct fomtierfs_page *data = container_of(node, struct fomtierfs_page, node);
 
         if (offset < data->page_offset)
             node = node->rb_left;
@@ -27,36 +27,36 @@ struct fomtierfs_page_map *fomtierfs_find_map(struct rb_root *root, u64 offset)
 }
 
 /*
- * Insert a new mapping into a mapping tree
+ * Insert a new page into a page tree
  * fomtierfs_inode_info->map_lock should be held in write mode.
  * @root The root of the rb tree to insert into
- * @map The mapping to insert into the tree
+ * @page The page to insert into the tree
  *
- * Returns true if the insert was successful, and false if a mapping at the same
+ * Returns true if the insert was successful, and false if a page at the same
  * offset already exists.
  */
-bool fomtierfs_insert_mapping(struct rb_root *root, struct fomtierfs_page_map *map)
+bool fomtierfs_insert_page(struct rb_root *root, struct fomtierfs_page *page)
 {
     struct rb_node **new = &(root->rb_node);
     struct rb_node *parent = NULL;
 
     // Find place to insert new node
     while (*new) {
-        struct fomtierfs_page_map *this = container_of(*new, struct fomtierfs_page_map, node);
+        struct fomtierfs_page *this = container_of(*new, struct fomtierfs_page, node);
 
         parent = *new;
 
-        if (map->page_offset < this->page_offset)
+        if (page->page_offset < this->page_offset)
             new = &((*new)->rb_left);
-        else if (map->page_offset > this->page_offset)
+        else if (page->page_offset > this->page_offset)
             new = &((*new)->rb_right);
         else
             return false;
     }
 
     // Insert the node and rebalance the tree
-    rb_link_node(&map->node, parent, new);
-    rb_insert_color(&map->node, root);
+    rb_link_node(&page->node, parent, new);
+    rb_insert_color(&page->node, root);
 
     return true;
 }
