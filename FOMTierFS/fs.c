@@ -14,6 +14,7 @@
 #include <linux/mman.h>
 #include <linux/statfs.h>
 #include <linux/kobject.h>
+#include <linux/falloc.h>
 
 #include "fs.h"
 
@@ -69,6 +70,58 @@ struct fomtierfs_page *fomtierfs_alloc_page(struct fomtierfs_sb_info *sbi)
     clear_page(prim->virt_addr + (page->page_num << PAGE_SHIFT));
 
     return page;
+}
+
+void fomtierfs_return_page(struct fomtierfs_sb_info *sbi, struct fomtierfs_page *page)
+{
+    struct fomtierfs_dev_info *dev;
+
+    dev = &sbi->mem[page->type];
+
+    spin_lock(&dev->lock);
+    list_add_tail(&page->list, &dev->free_list);
+    dev->free_pages++;
+    spin_unlock(&dev->lock);
+}
+
+static long fomtierfs_free_range(struct inode *inode, loff_t offset, loff_t len)
+{
+    struct fomtierfs_sb_info *sbi = FTFS_SB(inode->i_sb);
+    struct fomtierfs_inode_info *inode_info = FTFS_I(inode);
+    struct rb_node *node;
+    struct fomtierfs_page_map *mapping;
+    struct fomtierfs_page *page;
+    u64 page_offset = offset >> PAGE_SHIFT;
+    u64 num_pages = len >> PAGE_SHIFT;
+
+    write_lock(&inode_info->map_lock);
+    // TODO: Change this to instead of needing the page at the offset,
+    // just find the first mapping with an offset >= the requested offset.
+    mapping = fomtierfs_find_map(&inode_info->page_maps, offset);
+    if (!mapping) {
+        return 0;
+    }
+    node = &mapping->node;
+
+    pr_err("freeing range %llx to %llx\n", offset, offset + len);
+    while(mapping->page_offset < page_offset + num_pages) {
+        rb_erase(node, &inode_info->page_maps);
+
+        page = mapping->page;
+        fomtierfs_return_page(sbi, page);
+
+        kfree(mapping);
+
+        node = rb_next(node);
+        if (!node)
+            break;
+        mapping = container_of(node, struct fomtierfs_page_map, node);
+        pr_err("mapping %llx stop at %llx\n", mapping->page_offset, page_offset + num_pages);
+    }
+
+    write_unlock(&inode_info->map_lock);
+
+    return 0;
 }
 
 static int fomtierfs_iomap_begin(struct inode *inode, loff_t offset, loff_t length,
@@ -189,8 +242,11 @@ static long fomtierfs_fallocate(struct file *file, int mode, loff_t offset, loff
     loff_t off;
     long error;
 
-    if (mode != 0)
+    if (mode & FALLOC_FL_PUNCH_HOLE) {
+        return fomtierfs_free_range(inode, offset, len);
+    } else if (mode != 0) {
         return -EOPNOTSUPP;
+    }
 
     error = vfs_truncate(&file->f_path, len);
     if (error)
@@ -368,7 +424,6 @@ static void fomtierfs_free_inode(struct inode *inode) {
     struct rb_node *node = inode_info->page_maps.rb_node;
     struct fomtierfs_page_map *mapping;
     struct fomtierfs_page *page;
-    struct fomtierfs_dev_info *dev;
 
     // Free each mapping in the inode, and place each page back into the free list
     write_lock(&inode_info->map_lock);
@@ -378,12 +433,7 @@ static void fomtierfs_free_inode(struct inode *inode) {
         rb_erase(node, &inode_info->page_maps);
 
         page = mapping->page;
-        dev = &sbi->mem[page->type];
-
-        spin_lock(&dev->lock);
-        list_add_tail(&page->list, &dev->free_list);
-        dev->free_pages++;
-        spin_unlock(&dev->lock);
+        fomtierfs_return_page(sbi, page);
 
         kfree(mapping);
 
