@@ -36,7 +36,7 @@ struct fomtierfs_inode_info *FTFS_I(struct inode *inode)
     return inode->i_private;
 }
 
-struct fomtierfs_page *fomtierfs_alloc_page(struct fomtierfs_sb_info *sbi)
+struct fomtierfs_page *fomtierfs_alloc_page(struct inode *inode, struct fomtierfs_sb_info *sbi, u64 page_offset)
 {
     struct fomtierfs_page *page;
     struct fomtierfs_dev_info *prim, *sec;
@@ -62,9 +62,18 @@ struct fomtierfs_page *fomtierfs_alloc_page(struct fomtierfs_sb_info *sbi)
     }
 
     spin_lock(&prim->lock);
+
+    // Take a page from the free list
     page = list_first_entry(&prim->free_list, struct fomtierfs_page, list);
     list_del(&page->list);
+    page->page_offset = page_offset;
+    page->inode = inode;
     prim->free_pages--;
+
+    // Add the page to the active list
+    list_add(&page->list, &prim->active_list);
+    prim->active_pages++;
+
     spin_unlock(&prim->lock);
 
     clear_page(prim->virt_addr + (page->page_num << PAGE_SHIFT));
@@ -79,8 +88,17 @@ void fomtierfs_return_page(struct fomtierfs_sb_info *sbi, struct fomtierfs_page 
     dev = &sbi->mem[page->type];
 
     spin_lock(&dev->lock);
+
+    // Remove the page from the active list
+    list_del(&page->list);
+    dev->active_pages--;
+    page->page_offset = 0;
+    page->inode = NULL;
+
+    // Add the page to the end of the free list
     list_add_tail(&page->list, &dev->free_list);
     dev->free_pages++;
+
     spin_unlock(&dev->lock);
 }
 
@@ -89,7 +107,6 @@ static long fomtierfs_free_range(struct inode *inode, loff_t offset, loff_t len)
     struct fomtierfs_sb_info *sbi = FTFS_SB(inode->i_sb);
     struct fomtierfs_inode_info *inode_info = FTFS_I(inode);
     struct rb_node *node;
-    struct fomtierfs_page_map *mapping;
     struct fomtierfs_page *page;
     u64 page_offset = offset >> PAGE_SHIFT;
     u64 num_pages = len >> PAGE_SHIFT;
@@ -97,26 +114,21 @@ static long fomtierfs_free_range(struct inode *inode, loff_t offset, loff_t len)
     write_lock(&inode_info->map_lock);
     // TODO: Change this to instead of needing the page at the offset,
     // just find the first mapping with an offset >= the requested offset.
-    mapping = fomtierfs_find_map(&inode_info->page_maps, offset);
-    if (!mapping) {
+    page = fomtierfs_find_page(&inode_info->page_maps, offset);
+    if (!page) {
         return 0;
     }
-    node = &mapping->node;
+    node = &page->node;
 
-    pr_err("freeing range %llx to %llx\n", offset, offset + len);
-    while(mapping->page_offset < page_offset + num_pages) {
+    while(page->page_offset < page_offset + num_pages) {
         rb_erase(node, &inode_info->page_maps);
 
-        page = mapping->page;
         fomtierfs_return_page(sbi, page);
-
-        kfree(mapping);
 
         node = rb_next(node);
         if (!node)
             break;
-        mapping = container_of(node, struct fomtierfs_page_map, node);
-        pr_err("mapping %llx stop at %llx\n", mapping->page_offset, page_offset + num_pages);
+        page = container_of(node, struct fomtierfs_page, node);
     }
 
     write_unlock(&inode_info->map_lock);
@@ -129,7 +141,6 @@ static int fomtierfs_iomap_begin(struct inode *inode, loff_t offset, loff_t leng
 {
     struct fomtierfs_sb_info *sbi = FTFS_SB(inode->i_sb);
     struct fomtierfs_inode_info *inode_info = FTFS_I(inode);
-    struct fomtierfs_page_map *mapping;
     struct fomtierfs_page *page;
     u64 page_offset;
     u64 page_shift;
@@ -143,28 +154,19 @@ static int fomtierfs_iomap_begin(struct inode *inode, loff_t offset, loff_t leng
     iomap->length = length;
 
     read_lock(&inode_info->map_lock);
-    mapping = fomtierfs_find_map(&inode_info->page_maps, page_offset);
+    page = fomtierfs_find_page(&inode_info->page_maps, page_offset);
 
-    if (!mapping) {
+    if (!page) {
         read_unlock(&inode_info->map_lock);
 
-        mapping = kzalloc(sizeof(struct fomtierfs_page_map), GFP_KERNEL);
-        if (!mapping) {
-            pr_err("FOMTierFS: Error allocating new mapping");
-            return -ENOMEM;
-        }
-
-        page = fomtierfs_alloc_page(sbi);
+        page = fomtierfs_alloc_page(inode, sbi, page_offset);
         if (!page) {
-            kfree(mapping);
             return -ENOMEM;
         }
 
         // Save this new mapping
         write_lock(&inode_info->map_lock);
-        mapping->page_offset = page_offset;
-        mapping->page = page;
-        if (!fomtierfs_insert_mapping(&inode_info->page_maps, mapping)) {
+        if (!fomtierfs_insert_page(&inode_info->page_maps, page)) {
             BUG();
         }
 
@@ -176,7 +178,6 @@ static int fomtierfs_iomap_begin(struct inode *inode, loff_t offset, loff_t leng
         write_unlock(&inode_info->map_lock);
     } else {
         // There is already a page allocated for this offset, so just use that
-        page = mapping->page;
         iomap->type = IOMAP_MAPPED;
         iomap->addr = page->page_num << page_shift;
         iomap->bdev = sbi->mem[page->type].bdev;
@@ -237,7 +238,6 @@ static long fomtierfs_fallocate(struct file *file, int mode, loff_t offset, loff
     struct inode *inode = file_inode(file);
     struct fomtierfs_sb_info *sbi = FTFS_SB(inode->i_sb);
     struct fomtierfs_inode_info *inode_info = FTFS_I(inode);
-    struct fomtierfs_page_map *mapping;
     struct fomtierfs_page *page;
     loff_t off;
     long error;
@@ -254,22 +254,13 @@ static long fomtierfs_fallocate(struct file *file, int mode, loff_t offset, loff
 
     // Allocate and add mappings for the desired range
     for (off = offset; off < offset + len; off += PAGE_SIZE) {
-        mapping = kzalloc(sizeof(struct fomtierfs_page_map), GFP_KERNEL);
-        if (!mapping) {
-            pr_err("FOMTierFS: fallocate: Error allocating new mapping");
-            return -ENOMEM;
-        }
-
-        page = fomtierfs_alloc_page(sbi);
+        page = fomtierfs_alloc_page(inode, sbi, off >> PAGE_SHIFT);
         if (!page) {
-            kfree(mapping);
             return -ENOMEM;
         }
 
-        mapping->page_offset = off >> PAGE_SHIFT;
-        mapping->page = page;
         write_lock(&inode_info->map_lock);
-        if (!fomtierfs_insert_mapping(&inode_info->page_maps, mapping)) {
+        if (!fomtierfs_insert_page(&inode_info->page_maps, page)) {
             BUG();
         }
         write_unlock(&inode_info->map_lock);
@@ -422,20 +413,16 @@ static void fomtierfs_free_inode(struct inode *inode) {
     struct fomtierfs_sb_info *sbi = FTFS_SB(inode->i_sb);
     struct fomtierfs_inode_info *inode_info = FTFS_I(inode);
     struct rb_node *node = inode_info->page_maps.rb_node;
-    struct fomtierfs_page_map *mapping;
     struct fomtierfs_page *page;
 
     // Free each mapping in the inode, and place each page back into the free list
     write_lock(&inode_info->map_lock);
     while (node) {
-        mapping = container_of(node, struct fomtierfs_page_map, node);
+        page = container_of(node, struct fomtierfs_page, node);
 
         rb_erase(node, &inode_info->page_maps);
 
-        page = mapping->page;
         fomtierfs_return_page(sbi, page);
-
-        kfree(mapping);
 
         node = inode_info->page_maps.rb_node;
     }
@@ -506,7 +493,6 @@ static int fomtierfs_populate_dev_info(struct fomtierfs_dev_info *di, struct blo
     long i;
     long num_pages;
     pfn_t _pfn;
-    struct fomtierfs_page *tmp;
     struct fomtierfs_page *cursor, *temp;
 
     di->bdev = bdev;
@@ -522,8 +508,12 @@ static int fomtierfs_populate_dev_info(struct fomtierfs_dev_info *di, struct blo
 
     di->num_pages = num_pages;
     di->free_pages = num_pages;
+    di->active_pages = 0;
 
     INIT_LIST_HEAD(&di->free_list);
+    INIT_LIST_HEAD(&di->active_list);
+
+    // Put all of the pages into the free list
     for (i = 0; i < num_pages; i++) {
         struct fomtierfs_page *page = kzalloc(sizeof(struct fomtierfs_page), GFP_KERNEL);
         if (!page) {
@@ -533,12 +523,8 @@ static int fomtierfs_populate_dev_info(struct fomtierfs_dev_info *di, struct blo
 
         page->page_num = i;
         page->type = type;
+        page->inode = NULL;
         list_add(&page->list, &di->free_list);
-    }
-
-    i = 0;
-    list_for_each_entry(tmp, &di->free_list, list) {
-        i++;
     }
 
     spin_lock_init(&di->lock);

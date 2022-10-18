@@ -12,9 +12,12 @@ enum fomtierfs_mem_type {
 };
 
 struct fomtierfs_page {
-    u64 page_num;
-    enum fomtierfs_mem_type type;
-    struct list_head list;
+    u64 page_num; // The physical page number within the device
+    u64 page_offset; // The page offset within the file
+    struct inode *inode; // If the file is allocated, the inode it belongs to. Else null.
+    enum fomtierfs_mem_type type; // Whether this page is in fast or slow mem
+    struct list_head list; // Linked List to connect pages in the free/active list
+    struct rb_node node; // RB Tree keyed by page_offset used by inodes to keep track of their pages
 };
 
 struct fomtierfs_page_map {
@@ -28,8 +31,10 @@ struct fomtierfs_dev_info {
     struct dax_device *daxdev;
     void* virt_addr; // Kernel's virtual address to dax device
     struct list_head free_list;
+    struct list_head active_list;
     u64 num_pages;
     u64 free_pages;
+    u64 active_pages;
     spinlock_t lock;
 };
 
@@ -47,6 +52,6 @@ struct fomtierfs_sb_info *FTFS_SB(struct super_block *sb);
 
 struct fomtierfs_inode_info *FTFS_I(struct inode *inode);
 
-struct fomtierfs_page_map *fomtierfs_find_map(struct rb_root *root, u64 offset);
-bool fomtierfs_insert_mapping(struct rb_root *root, struct fomtierfs_page_map *map);
+struct fomtierfs_page *fomtierfs_find_page(struct rb_root *root, u64 offset);
+bool fomtierfs_insert_page(struct rb_root *root, struct fomtierfs_page *page);
 #endif // FOMTIERFS_FS_H
