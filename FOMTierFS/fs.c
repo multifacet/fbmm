@@ -15,6 +15,10 @@
 #include <linux/statfs.h>
 #include <linux/kobject.h>
 #include <linux/falloc.h>
+#include <linux/kthread.h>
+#include <linux/delay.h>
+
+#include <asm/tlbflush.h>
 
 #include "fs.h"
 
@@ -133,6 +137,86 @@ static long fomtierfs_free_range(struct inode *inode, loff_t offset, loff_t len)
 
     write_unlock(&inode_info->map_lock);
 
+    return 0;
+}
+
+static pte_t *fomtierfs_find_pte(struct vm_area_struct *vma, u64 address)
+{
+    pgd_t *pgd;
+    p4d_t *p4d;
+    pud_t *pud;
+    pmd_t *pmd;
+    pte_t *pte;
+
+    if (address >= vma->vm_end)
+        return NULL;
+
+    pgd = pgd_offset(vma->vm_mm, address);
+    if (pgd_none(*pgd) || pgd_bad(*pgd))
+        return NULL;
+
+    p4d = p4d_offset(pgd, address);
+    if (p4d_none(*p4d) || p4d_bad(*p4d))
+        return NULL;
+
+    pud = pud_offset(p4d, address);
+    if (pud_none(*pud) || pud_bad(*pud))
+        return NULL;
+
+    pmd = pmd_offset(pud, address);
+    if (pmd_none(*pmd) || pmd_bad(*pmd))
+        return NULL;
+
+    pte = pte_offset_kernel(pmd, address);
+    if (!pte || !pte_present(*pte))
+        return NULL;
+
+    return pte;
+}
+
+static int fomtierfs_migrate_task(void *data)
+{
+    struct fomtierfs_page *page;
+    struct fomtierfs_sb_info *sbi = data;
+    struct fomtierfs_dev_info *dev = &sbi->mem[FAST_MEM];
+    struct vm_area_struct *vma;
+    struct address_space *as;
+    bool pte_modified = false;
+    u64 addr;
+    pte_t *ptep;
+    pte_t pte;
+
+    while (!kthread_should_stop()) {
+        spin_lock(&dev->lock);
+
+        list_for_each_entry(page, &dev->active_list, list) {
+            as = page->inode->i_mapping;
+            i_mmap_lock_read(as);
+            vma_interval_tree_foreach(vma, &as->i_mmap, page->page_offset, page->page_offset) {
+                addr = vma->vm_start + ((page->page_offset - vma->vm_pgoff) << PAGE_SHIFT);
+
+                ptep = fomtierfs_find_pte(vma, addr);
+
+                if (pte_young(*ptep)) {
+                    pte = pte_mkold(*ptep);
+                    set_pte_at(vma->vm_mm, addr, ptep, pte);
+                    pte_modified = true;
+                }
+            }
+            i_mmap_unlock_read(as);
+        }
+
+        if (pte_modified) {
+            // Somebody in 2020 decided that modules "have no business" with the more
+            // granular tlb flushing functions, so we're stuck nuking the TLB if we update some PTEs
+            // https://github.com/torvalds/linux/commit/bfe3d8f6313d1e10806062ba22c5f660dddecbcc
+            __flush_tlb_all();
+        }
+
+        spin_unlock(&dev->lock);
+
+        msleep_interruptible(10000);
+    }
     return 0;
 }
 
@@ -588,6 +672,16 @@ static int fomtierfs_fill_super(struct super_block *sb, struct fs_context *fc)
         kfree(sbi);
         return -ENOMEM;
     }
+
+    // Start the page migration thread
+    sbi->migrate_task = kthread_create(fomtierfs_migrate_task, sbi, "FTFS Migrate Thread");
+    if (!sbi->migrate_task) {
+        pr_err("FOMTierFS: Failed to create the migration task");
+        kfree(sbi);
+        return -ENOMEM;
+    }
+
+    wake_up_process(sbi->migrate_task);
 
     sbi->alloc_fast = true;
     fc->s_fs_info = sbi;

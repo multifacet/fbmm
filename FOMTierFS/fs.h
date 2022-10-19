@@ -5,6 +5,7 @@
 #include <linux/fs.h>
 #include <linux/rbtree.h>
 #include <linux/spinlock.h>
+#include <linux/sched.h>
 
 enum fomtierfs_mem_type {
     FAST_MEM = 0,
@@ -40,6 +41,7 @@ struct fomtierfs_dev_info {
 
 struct fomtierfs_sb_info {
     struct fomtierfs_dev_info mem[2];
+    struct task_struct *migrate_task;
     bool alloc_fast;
 };
 
