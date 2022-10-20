@@ -41,8 +41,11 @@ struct fomtierfs_dev_info {
 
 struct fomtierfs_sb_info {
     struct fomtierfs_dev_info mem[2];
-    struct task_struct *migrate_task;
-    bool alloc_fast;
+    struct task_struct *demote_task;
+    // Start demotion if fast_mem has less than demotion_watermark% of memory free
+    u64 demotion_watermark;
+    // Stop allocating from fast_mem if it has less than alloc_watermark% of memory free
+    u64 alloc_watermark;
 };
 
 struct fomtierfs_inode_info {

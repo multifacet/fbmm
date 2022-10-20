@@ -45,15 +45,15 @@ struct fomtierfs_page *fomtierfs_alloc_page(struct inode *inode, struct fomtierf
     struct fomtierfs_page *page;
     struct fomtierfs_dev_info *prim, *sec;
 
-    // Decide which device to allocate from
-    if (sbi->alloc_fast) {
+    // If the free memory in fast mem is greater than the alloc watermark,
+    // alloc from fast mem, otherwise alloc from slow mem
+    if (sbi->mem[FAST_MEM].free_pages > sbi->alloc_watermark) {
         prim = &sbi->mem[FAST_MEM];
         sec = &sbi->mem[SLOW_MEM];
     } else {
         prim = &sbi->mem[SLOW_MEM];
         sec = &sbi->mem[FAST_MEM];
     }
-    sbi->alloc_fast = !sbi->alloc_fast;
 
     // Try to allocate from the desired free list, otherwise try the other
     if (list_empty(&prim->free_list)) {
@@ -174,7 +174,7 @@ static pte_t *fomtierfs_find_pte(struct vm_area_struct *vma, u64 address)
     return pte;
 }
 
-static int fomtierfs_migrate_task(void *data)
+static int fomtierfs_demote_task(void *data)
 {
     struct fomtierfs_page *page;
     struct fomtierfs_sb_info *sbi = data;
@@ -188,6 +188,11 @@ static int fomtierfs_migrate_task(void *data)
 
     while (!kthread_should_stop()) {
         spin_lock(&dev->lock);
+
+        // Only do demotion if we are below the demotion watermark
+        if (dev->free_pages > sbi->demotion_watermark) {
+            goto sleep;
+        }
 
         list_for_each_entry(page, &dev->active_list, list) {
             as = page->inode->i_mapping;
@@ -213,8 +218,8 @@ static int fomtierfs_migrate_task(void *data)
             __flush_tlb_all();
         }
 
+sleep:
         spin_unlock(&dev->lock);
-
         msleep_interruptible(10000);
     }
     return 0;
@@ -674,16 +679,19 @@ static int fomtierfs_fill_super(struct super_block *sb, struct fs_context *fc)
     }
 
     // Start the page migration thread
-    sbi->migrate_task = kthread_create(fomtierfs_migrate_task, sbi, "FTFS Migrate Thread");
-    if (!sbi->migrate_task) {
+    sbi->demote_task = kthread_create(fomtierfs_demote_task, sbi, "FTFS Demote Thread");
+    if (!sbi->demote_task) {
         pr_err("FOMTierFS: Failed to create the migration task");
         kfree(sbi);
         return -ENOMEM;
     }
 
-    wake_up_process(sbi->migrate_task);
+    wake_up_process(sbi->demote_task);
 
-    sbi->alloc_fast = true;
+    // Make the demotion watermark 2% of the total mem
+    sbi->demotion_watermark = sbi->mem[FAST_MEM].num_pages * 2 / 100;
+    // Make the alloc watermark 1% of the total mem
+    sbi->alloc_watermark = sbi->mem[FAST_MEM].num_pages / 100;
     fc->s_fs_info = sbi;
     sysfs_sb_info = sbi;
 
@@ -733,11 +741,15 @@ static ssize_t usage_show(struct kobject *kobj,
     if (sysfs_sb_info) {
         return sprintf(buf,
             "fast total: %lld\tfree: %lld\n"
-            "slow total: %lld\tfree: %lld\n",
+            "slow total: %lld\tfree: %lld\n"
+            "Demotion Watermark: %llu Alloc Watermark: %llu\n",
             sysfs_sb_info->mem[FAST_MEM].num_pages,
             sysfs_sb_info->mem[FAST_MEM].free_pages,
             sysfs_sb_info->mem[SLOW_MEM].num_pages,
-            sysfs_sb_info->mem[SLOW_MEM].free_pages);
+            sysfs_sb_info->mem[SLOW_MEM].free_pages,
+            sysfs_sb_info->demotion_watermark,
+            sysfs_sb_info->alloc_watermark
+        );
     } else {
         return sprintf(buf, "Not mounted");
     }
