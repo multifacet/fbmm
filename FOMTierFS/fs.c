@@ -110,7 +110,7 @@ static long fomtierfs_free_range(struct inode *inode, loff_t offset, loff_t len)
 {
     struct fomtierfs_sb_info *sbi = FTFS_SB(inode->i_sb);
     struct fomtierfs_inode_info *inode_info = FTFS_I(inode);
-    struct rb_node *node;
+    struct rb_node *node, *next_node;
     struct fomtierfs_page *page;
     u64 page_offset = offset >> PAGE_SHIFT;
     u64 num_pages = len >> PAGE_SHIFT;
@@ -125,13 +125,14 @@ static long fomtierfs_free_range(struct inode *inode, loff_t offset, loff_t len)
     node = &page->node;
 
     while(page->page_offset < page_offset + num_pages) {
+        next_node = rb_next(node);
         rb_erase(node, &inode_info->page_maps);
 
         fomtierfs_return_page(sbi, page);
 
-        node = rb_next(node);
-        if (!node)
+        if (!next_node)
             break;
+        node = next_node;
         page = container_of(node, struct fomtierfs_page, node);
     }
 
