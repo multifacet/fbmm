@@ -199,6 +199,7 @@ static void fomtierfs_demote_one(struct fomtierfs_sb_info *sbi, struct fomtierfs
     struct vm_area_struct *vma;
     struct address_space *as;
     u64 virt_addr;
+    u64 slow_pfn;
     void *fast_kaddr, *slow_kaddr;
     pte_t *ptep;
     pte_t pte;
@@ -280,11 +281,10 @@ static void fomtierfs_demote_one(struct fomtierfs_sb_info *sbi, struct fomtierfs
     page->page_offset = 0;
     page->inode = NULL;
 
-    // Mark the pte as not present so on the next access a page fault
-    // will occur to set the pte correctly.
-    // It would probably be more efficient to just set the pte directly,
-    // but it's unclear to me how to get the right PFN.
-    pte = pfn_pte(slow_dev->pfn.val + (*slow_page)->page_num, pte_pgprot(*ptep));
+    // Update the pte to point to the slow page
+    slow_pfn = slow_dev->pfn.val + (*slow_page)->page_num;
+    pte = pfn_pte(slow_pfn, pte_pgprot(*ptep));
+    pte = pte_mkold(pte);
     set_pte_at(vma->vm_mm, virt_addr, ptep, pte);
     __flush_tlb_all();
 
@@ -317,7 +317,7 @@ static int fomtierfs_demote_task(void *data)
     struct fomtierfs_dev_info *fast_dev = &sbi->mem[FAST_MEM];
     struct fomtierfs_dev_info *slow_dev = &sbi->mem[SLOW_MEM];
     bool pte_modified = false;
-    u64 pages_to_check;
+    u64 pages_to_demote;
     u64 i;
 
     while (!kthread_should_stop()) {
@@ -326,9 +326,10 @@ static int fomtierfs_demote_task(void *data)
             goto sleep;
         }
 
-        pages_to_check = min(fast_dev->active_pages, MAX_MIGRATE);
+        pages_to_demote = min(fast_dev->active_pages, MAX_MIGRATE);
+        pages_to_demote = min(pages_to_demote, sbi->demotion_watermark - fast_dev->free_pages);
 
-        for (i = 0; i < pages_to_check; i++) {
+        for (i = 0; i < pages_to_demote; i++) {
             // If we don't currently have a slow page to move to, get one
             if (!slow_page) {
                 spin_lock(&slow_dev->lock);
