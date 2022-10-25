@@ -60,3 +60,23 @@ bool fomtierfs_insert_page(struct rb_root *root, struct fomtierfs_page *page)
 
     return true;
 }
+
+/*
+ * Replaces the node currently in the tree at new_page->offset.
+ * If such a page does not already exist in the tree, BUG out.
+ * The fomtierfs_inode_info.map_lock should be held in write mode before this
+ * function is called.
+ * @root The root of the rb tree to modify
+ * @new_page The page that will replace the new page
+ */
+void fomtierfs_replace_page(struct rb_root *root, struct fomtierfs_page *new_page)
+{
+    struct fomtierfs_page *old_page;
+
+    old_page = fomtierfs_find_page(root, new_page->page_offset);
+    if (!old_page) {
+        BUG();
+    }
+
+    rb_replace_node(&old_page->node, &new_page->node, root);
+}

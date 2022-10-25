@@ -7,6 +7,15 @@
 #include <linux/spinlock.h>
 #include <linux/sched.h>
 
+/**
+ * FOMTierFS Lock Priority (from highest priority to lowest):
+ *  1) fomtierfs_dev_info.lock
+ *  2) fomtierfs_page.lock
+ *      2a) Pages from the fast device
+ *      2b) Pages from the slow device
+ *  3) fomtierfs_inode_info.map_lock
+ */
+
 enum fomtierfs_mem_type {
     FAST_MEM = 0,
     SLOW_MEM = 1,
@@ -17,13 +26,10 @@ struct fomtierfs_page {
     u64 page_offset; // The page offset within the file
     struct inode *inode; // If the file is allocated, the inode it belongs to. Else null.
     enum fomtierfs_mem_type type; // Whether this page is in fast or slow mem
-    struct list_head list; // Linked List to connect pages in the free/active list
-    struct rb_node node; // RB Tree keyed by page_offset used by inodes to keep track of their pages
-};
-
-struct fomtierfs_page_map {
-    u64 page_offset; // File Offset / Page Size
-    struct fomtierfs_page *page; // The physical page mapped to the offset
+    spinlock_t lock; // Lock that protects the fields of this struct above it.
+    // Linked List to connect pages in the free/active list. Protected by fomtierfs_dev_info.lock
+    struct list_head list;
+    // RB Tree keyed by page_offset used by inodes to keep track of their pages. Protected by fomtierfs_inode_info.map_lock
     struct rb_node node;
 };
 
@@ -31,6 +37,7 @@ struct fomtierfs_dev_info {
     struct block_device *bdev;
     struct dax_device *daxdev;
     void* virt_addr; // Kernel's virtual address to dax device
+    pfn_t pfn; // The pfn of the first page of the device
     struct list_head free_list;
     struct list_head active_list;
     u64 num_pages;
@@ -59,4 +66,5 @@ struct fomtierfs_inode_info *FTFS_I(struct inode *inode);
 
 struct fomtierfs_page *fomtierfs_find_page(struct rb_root *root, u64 offset);
 bool fomtierfs_insert_page(struct rb_root *root, struct fomtierfs_page *page);
+void fomtierfs_replace_page(struct rb_root *root, struct fomtierfs_page *new_page);
 #endif // FOMTIERFS_FS_H
