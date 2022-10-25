@@ -835,7 +835,7 @@ static int fomtierfs_fill_super(struct super_block *sb, struct fs_context *fc)
     wake_up_process(sbi->demote_task);
 
     // Make the demotion watermark 2% of the total mem
-    sbi->demotion_watermark = sbi->mem[FAST_MEM].num_pages -10;//* 2 / 100;
+    sbi->demotion_watermark = sbi->mem[FAST_MEM].num_pages * 2 / 100;
     // Make the alloc watermark 1% of the total mem
     sbi->alloc_watermark = sbi->mem[FAST_MEM].num_pages / 100;
     fc->s_fs_info = sbi;
