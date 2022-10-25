@@ -161,7 +161,9 @@ static int truncate_fom_file(struct file *f, unsigned long len, int flags) {
 	inode = dentry->d_inode;
 
 	if ((flags & MAP_POPULATE) && fom_prealloc_map_populate) {
-		error = vfs_fallocate(f, 0, 0, len);
+		error = vfs_truncate(&f->f_path, len);
+		if (!error)
+			error = vfs_fallocate(f, 0, 0, len);
 	} else {
 		sb_start_write(inode->i_sb);
 		error = locks_verify_truncate(inode, f, len);

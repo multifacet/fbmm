@@ -70,9 +70,13 @@ struct fomtierfs_page *fomtierfs_alloc_page(struct inode *inode, struct fomtierf
     // Take a page from the free list
     page = list_first_entry(&prim->free_list, struct fomtierfs_page, list);
     list_del(&page->list);
+    prim->free_pages--;
+
+    spin_lock(&page->lock);
     page->page_offset = page_offset;
     page->inode = inode;
-    prim->free_pages--;
+    spin_unlock(&page->lock);
+
 
     // Add the page to the active list
     list_add(&page->list, &prim->active_list);
@@ -96,8 +100,11 @@ void fomtierfs_return_page(struct fomtierfs_sb_info *sbi, struct fomtierfs_page 
     // Remove the page from the active list
     list_del(&page->list);
     dev->active_pages--;
+
+    spin_lock(&page->lock);
     page->page_offset = 0;
     page->inode = NULL;
+    spin_unlock(&page->lock);
 
     // Add the page to the end of the free list
     list_add_tail(&page->list, &dev->free_list);
@@ -128,10 +135,18 @@ static long fomtierfs_free_range(struct inode *inode, loff_t offset, loff_t len)
         next_node = rb_next(node);
         rb_erase(node, &inode_info->page_maps);
 
+        // fomtierfs_return_page take the fomtierfs_dev_info.lock and fomtierfs_page.lock
+        // which have higher priority than inode_info->map_lock, so we have to give it up
+        write_unlock(&inode_info->map_lock);
+
         fomtierfs_return_page(sbi, page);
 
         if (!next_node)
             break;
+
+        // take back the map_lock
+        write_lock(&inode_info->map_lock);
+
         node = next_node;
         page = container_of(node, struct fomtierfs_page, node);
     }
@@ -175,41 +190,164 @@ static pte_t *fomtierfs_find_pte(struct vm_area_struct *vma, u64 address)
     return pte;
 }
 
+// Reader Beware: This function is a mess of locking and unlocking
 static int fomtierfs_demote_task(void *data)
 {
+    // The maximum number of pages to migrate in one iteration
+    const u64 MAX_MIGRATE = 1024;
     struct fomtierfs_page *page;
+    struct fomtierfs_page *slow_page = NULL;
     struct fomtierfs_sb_info *sbi = data;
-    struct fomtierfs_dev_info *dev = &sbi->mem[FAST_MEM];
+    struct fomtierfs_inode_info *inode_info;
+    struct fomtierfs_dev_info *fast_dev = &sbi->mem[FAST_MEM];
+    struct fomtierfs_dev_info *slow_dev = &sbi->mem[SLOW_MEM];
     struct vm_area_struct *vma;
     struct address_space *as;
     bool pte_modified = false;
-    u64 addr;
+    u64 pages_to_check;
+    u64 i;
+    u64 virt_addr;
+    void *fast_kaddr, *slow_kaddr;
     pte_t *ptep;
     pte_t pte;
 
     while (!kthread_should_stop()) {
-        spin_lock(&dev->lock);
-
         // Only do demotion if we are below the demotion watermark
-        if (dev->free_pages > sbi->demotion_watermark) {
+        if (fast_dev->free_pages > sbi->demotion_watermark) {
             goto sleep;
         }
 
-        list_for_each_entry(page, &dev->active_list, list) {
+        pages_to_check = min(fast_dev->active_pages, MAX_MIGRATE);
+
+        for (i = 0; i < pages_to_check; i++) {
+            // If we don't currently have a slow page to move to, get one
+            if (!slow_page) {
+                spin_lock(&slow_dev->lock);
+
+                if (list_empty(&slow_dev->free_list)) {
+                    spin_unlock(&slow_dev->lock);
+                    goto sleep;
+                }
+
+                slow_page = list_first_entry(&slow_dev->free_list, struct fomtierfs_page, list);
+                list_del(&slow_page->list);
+                slow_dev->free_pages--;
+                spin_unlock(&slow_dev->lock);
+            }
+
+            // Grab the page at the end of the active list
+            spin_lock(&fast_dev->lock);
+            page = list_last_entry(&fast_dev->active_list, struct fomtierfs_page, list);
+            list_del(&page->list);
+            fast_dev->active_pages--;
+
+            // Figure out if the page is old or not
+            spin_lock(&page->lock);
+
+            // Make sure the page is still mapped to a file
+            if (!page->inode) {
+                spin_unlock(&page->lock);
+                spin_unlock(&fast_dev->lock);
+                continue;
+            }
+
             as = page->inode->i_mapping;
             i_mmap_lock_read(as);
-            vma_interval_tree_foreach(vma, &as->i_mmap, page->page_offset, page->page_offset) {
-                addr = vma->vm_start + ((page->page_offset - vma->vm_pgoff) << PAGE_SHIFT);
 
-                ptep = fomtierfs_find_pte(vma, addr);
+            vma = vma_interval_tree_iter_first(&as->i_mmap, page->page_offset, page->page_offset);
+            virt_addr = vma->vm_start + ((page->page_offset - vma->vm_pgoff) << PAGE_SHIFT);
+            ptep = fomtierfs_find_pte(vma, virt_addr);
 
-                if (pte_young(*ptep)) {
-                    pte = pte_mkold(*ptep);
-                    set_pte_at(vma->vm_mm, addr, ptep, pte);
-                    pte_modified = true;
-                }
+            if (pte_young(*ptep)) {
+                pte = pte_mkold(*ptep);
+                set_pte_at(vma->vm_mm, virt_addr, ptep, pte);
+                pte_modified = true;
+
+                // The page was accessed recently, so put it back and move
+                // on to the next one.
+                list_add(&page->list, &fast_dev->active_list);
+                fast_dev->active_pages++;
+
+                i_mmap_unlock_read(as);
+                spin_unlock(&page->lock);
+                spin_unlock(&fast_dev->lock);
+                continue;
             }
+
             i_mmap_unlock_read(as);
+            spin_unlock(&page->lock);
+            spin_unlock(&fast_dev->lock);
+
+            spin_lock(&page->lock);
+            // Make sure the page is still mapped to a file
+            if (!page->inode) {
+                spin_unlock(&page->lock);
+                continue;
+            }
+
+            spin_lock(&slow_page->lock);
+
+            inode_info = FTFS_I(page->inode);
+            write_lock(&inode_info->map_lock);
+
+            // Start by write protecting the page we're copying.
+            // If the application faults on this page, we hold the inode write lock,
+            // so the fault should stall in iomap_begin until we're done copying.
+            pte = pte_wrprotect(*ptep);
+            set_pte_at(vma->vm_mm, virt_addr, ptep, pte);
+            __flush_tlb_all();
+
+            // Copy the page
+            fast_kaddr = fast_dev->virt_addr + (page->page_num << PAGE_SHIFT);
+            slow_kaddr = slow_dev->virt_addr + (slow_page->page_num << PAGE_SHIFT);
+            copy_page(slow_kaddr, fast_kaddr);
+
+            // Copy the metadata
+            slow_page->page_offset = page->page_offset;
+            slow_page->inode = page->inode;
+
+            // Replace the old page with the new page in the map tree
+            fomtierfs_replace_page(&inode_info->page_maps, slow_page);
+
+            // The fast page is about to be put in the free list soon, so clear it
+            page->page_offset = 0;
+            page->inode = NULL;
+
+            // Mark the pte as not present so on the next access a page fault
+            // will occur to set the pte correctly.
+            // It would probably be more efficient to just set the pte directly,
+            // but it's unclear to me how to get the right PFN.
+            pte = pfn_pte(slow_dev->pfn.val + slow_page->page_num, pte_pgprot(*ptep));
+            set_pte_at(vma->vm_mm, virt_addr, ptep, pte);
+            __flush_tlb_all();
+
+            write_unlock(&inode_info->map_lock);
+            spin_unlock(&slow_page->lock);
+            spin_unlock(&page->lock);
+
+            // Put the pages in the lists where they belong
+            spin_lock(&fast_dev->lock);
+            list_add(&page->list, &fast_dev->free_list);
+            fast_dev->free_pages++;
+            spin_unlock(&fast_dev->lock);
+
+            spin_lock(&slow_dev->lock);
+            list_add(&slow_page->list, &slow_dev->active_list);
+            slow_dev->active_pages++;
+            spin_unlock(&slow_dev->lock);
+
+            // Indicate that we need to find a new slow_page
+            slow_page = NULL;
+        }
+
+        // If we have a slow_page left over, put it back in the free list
+        if (slow_page) {
+            spin_lock(&slow_dev->lock);
+            list_add(&slow_page->list, &slow_dev->free_list);
+            slow_dev->free_pages++;
+            spin_unlock(&slow_dev->lock);
+
+            slow_page = NULL;
         }
 
         if (pte_modified) {
@@ -220,7 +358,6 @@ static int fomtierfs_demote_task(void *data)
         }
 
 sleep:
-        spin_unlock(&dev->lock);
         msleep_interruptible(10000);
     }
     return 0;
@@ -330,17 +467,12 @@ static long fomtierfs_fallocate(struct file *file, int mode, loff_t offset, loff
     struct fomtierfs_inode_info *inode_info = FTFS_I(inode);
     struct fomtierfs_page *page;
     loff_t off;
-    long error;
 
     if (mode & FALLOC_FL_PUNCH_HOLE) {
         return fomtierfs_free_range(inode, offset, len);
     } else if (mode != 0) {
         return -EOPNOTSUPP;
     }
-
-    error = vfs_truncate(&file->f_path, len);
-    if (error)
-        return error;
 
     // Allocate and add mappings for the desired range
     for (off = offset; off < offset + len; off += PAGE_SIZE) {
@@ -512,7 +644,13 @@ static void fomtierfs_free_inode(struct inode *inode) {
 
         rb_erase(node, &inode_info->page_maps);
 
+        // fomtierfs_return_page take the fomtierfs_dev_info.lock and fomtierfs_page.lock
+        // which have higher priority than inode_info->map_lock, so we have to give it up
+        write_unlock(&inode_info->map_lock);
+
         fomtierfs_return_page(sbi, page);
+
+        write_lock(&inode_info->map_lock);
 
         node = inode_info->page_maps.rb_node;
     }
@@ -582,7 +720,6 @@ static int fomtierfs_populate_dev_info(struct fomtierfs_dev_info *di, struct blo
     int ret = 0;
     long i;
     long num_pages;
-    pfn_t _pfn;
     struct fomtierfs_page *cursor, *temp;
 
     di->bdev = bdev;
@@ -590,7 +727,7 @@ static int fomtierfs_populate_dev_info(struct fomtierfs_dev_info *di, struct blo
 
     // Determine how many pages are in the device
     num_pages = dax_direct_access(di->daxdev, 0, LONG_MAX / PAGE_SIZE,
-                    &di->virt_addr, &_pfn);
+                    &di->virt_addr, &di->pfn);
     if (num_pages <= 0) {
         pr_err("FOMTierFS: Determining device size failed");
         return -EIO;
@@ -614,6 +751,7 @@ static int fomtierfs_populate_dev_info(struct fomtierfs_dev_info *di, struct blo
         page->page_num = i;
         page->type = type;
         page->inode = NULL;
+        spin_lock_init(&page->lock);
         list_add(&page->list, &di->free_list);
     }
 
