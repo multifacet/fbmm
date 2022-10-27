@@ -25,6 +25,7 @@ struct fomtierfs_page {
     u64 page_num; // The physical page number within the device
     u64 page_offset; // The page offset within the file
     struct inode *inode; // If the file is allocated, the inode it belongs to. Else null.
+    bool last_accessed; // Whether the accessed bit was set last time it was checked
     enum fomtierfs_mem_type type; // Whether this page is in fast or slow mem
     spinlock_t lock; // Lock that protects the fields of this struct above it.
     // Linked List to connect pages in the free/active list. Protected by fomtierfs_dev_info.lock

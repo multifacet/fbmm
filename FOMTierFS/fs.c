@@ -75,6 +75,7 @@ struct fomtierfs_page *fomtierfs_alloc_page(struct inode *inode, struct fomtierf
     spin_lock(&page->lock);
     page->page_offset = page_offset;
     page->inode = inode;
+    page->last_accessed = true;
     spin_unlock(&page->lock);
 
 
@@ -198,6 +199,7 @@ static void fomtierfs_demote_one(struct fomtierfs_sb_info *sbi, struct fomtierfs
     struct fomtierfs_page *page;
     struct vm_area_struct *vma;
     struct address_space *as;
+    bool accessed, last_accessed;
     u64 virt_addr;
     u64 slow_pfn;
     void *fast_kaddr, *slow_kaddr;
@@ -227,7 +229,13 @@ static void fomtierfs_demote_one(struct fomtierfs_sb_info *sbi, struct fomtierfs
     virt_addr = vma->vm_start + ((page->page_offset - vma->vm_pgoff) << PAGE_SHIFT);
     ptep = fomtierfs_find_pte(vma, virt_addr);
 
-    if (pte_young(*ptep)) {
+    accessed = pte_young(*ptep);
+    last_accessed = page->last_accessed;
+    page->last_accessed = accessed;
+
+    // Only demote if this page hasn't been accessed in either of
+    // the last couple of checks
+    if (accessed || last_accessed) {
         pte = pte_mkold(*ptep);
         set_pte_at(vma->vm_mm, virt_addr, ptep, pte);
 
@@ -273,6 +281,7 @@ static void fomtierfs_demote_one(struct fomtierfs_sb_info *sbi, struct fomtierfs
     // Copy the metadata
     (*slow_page)->page_offset = page->page_offset;
     (*slow_page)->inode = page->inode;
+    (*slow_page)->last_accessed = false;
 
     // Replace the old page with the new page in the map tree
     fomtierfs_replace_page(&inode_info->page_maps, *slow_page);
@@ -315,6 +324,7 @@ static void fomtierfs_promote_one(struct fomtierfs_sb_info *sbi, struct fomtierf
     struct fomtierfs_page *page;
     struct vm_area_struct *vma;
     struct address_space *as;
+    bool accessed, last_accessed;
     u64 virt_addr;
     u64 fast_pfn;
     void *fast_kaddr, *slow_kaddr;
@@ -344,7 +354,13 @@ static void fomtierfs_promote_one(struct fomtierfs_sb_info *sbi, struct fomtierf
     virt_addr = vma->vm_start + ((page->page_offset - vma->vm_pgoff) << PAGE_SHIFT);
     ptep = fomtierfs_find_pte(vma, virt_addr);
 
-    if (!pte_young(*ptep)) {
+    accessed = pte_young(*ptep);
+    last_accessed = page->last_accessed;
+    page->last_accessed = accessed;
+
+    // Only promote if the page has been accessed in both of the last
+    // couple of checks.
+    if (!accessed || !last_accessed) {
         // The page was not accessed recently, so put it back and move
         // on to the next one.
         list_add(&page->list, &slow_dev->active_list);
@@ -386,6 +402,7 @@ static void fomtierfs_promote_one(struct fomtierfs_sb_info *sbi, struct fomtierf
     // Copy the metadata
     (*fast_page)->page_offset = page->page_offset;
     (*fast_page)->inode = page->inode;
+    (*fast_page)->last_accessed = true;
 
     // Replace the old page with the new page in the map tree
     fomtierfs_replace_page(&inode_info->page_maps, *fast_page);
@@ -511,7 +528,7 @@ static int fomtierfs_demote_task(void *data)
             fast_page = NULL;
         }
 
-        msleep_interruptible(10000);
+        msleep_interruptible(5000);
     }
     return 0;
 }
