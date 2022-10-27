@@ -424,25 +424,29 @@ static void fomtierfs_promote_one(struct fomtierfs_sb_info *sbi, struct fomtierf
 static int fomtierfs_demote_task(void *data)
 {
     // The maximum number of pages to migrate in one iteration
-    const u64 MAX_MIGRATE = 1024;
+    const u64 MAX_MIGRATE = 1 << 20;
     struct fomtierfs_page *slow_page = NULL;
     struct fomtierfs_page *fast_page = NULL;
     struct fomtierfs_sb_info *sbi = data;
     struct fomtierfs_dev_info *fast_dev = &sbi->mem[FAST_MEM];
     struct fomtierfs_dev_info *slow_dev = &sbi->mem[SLOW_MEM];
-    u64 pages_to_demote, pages_to_promote;
+    u64 pages_to_check;
     u64 i;
 
     while (!kthread_should_stop()) {
-        // Only do demotion if we are below the demotion watermark
-        if (fast_dev->free_pages > sbi->demotion_watermark) {
-            goto promote;
-        }
+        /**
+         * Demotion code
+         */
+        pages_to_check = min(fast_dev->active_pages, MAX_MIGRATE);
 
-        pages_to_demote = min(fast_dev->active_pages, MAX_MIGRATE);
-        pages_to_demote = min(pages_to_demote, sbi->demotion_watermark - fast_dev->free_pages);
+        for (i = 0; i < pages_to_check; i++) {
+            // Don't migrate past the watermark.
+            // I should *probably* take a lock here, but being off by a page
+            // or two is no big deal.
+            if (fast_dev->free_pages > sbi->demotion_watermark) {
+                break;
+            }
 
-        for (i = 0; i < pages_to_demote; i++) {
             // If we don't currently have a slow page to move to, get one
             if (!slow_page) {
                 spin_lock(&slow_dev->lock);
@@ -471,16 +475,14 @@ static int fomtierfs_demote_task(void *data)
             slow_page = NULL;
         }
 
-promote:
-        // Only do promotion if we are above the allocation watermark
-        if (fast_dev->free_pages < sbi->alloc_watermark) {
-            goto sleep;
-        }
+        pages_to_check = min(slow_dev->active_pages, MAX_MIGRATE);
 
-        pages_to_promote = min(slow_dev->active_pages, MAX_MIGRATE);
-        pages_to_promote = min(pages_to_promote, fast_dev->free_pages - sbi->alloc_watermark);
+        for (i = 0; i < pages_to_check; i++) {
+            // Don't migrate past the watermark.
+            if (fast_dev->free_pages <= sbi->alloc_watermark) {
+                break;
+            }
 
-        for (i = 0; i < pages_to_promote; i++) {
             // If we don't have a fast page to move to, get one
             if (!fast_page) {
                 spin_lock(&fast_dev->lock);
@@ -509,7 +511,6 @@ promote:
             fast_page = NULL;
         }
 
-sleep:
         msleep_interruptible(10000);
     }
     return 0;
