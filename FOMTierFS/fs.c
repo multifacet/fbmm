@@ -565,7 +565,7 @@ static int fomtierfs_demote_task(void *data)
             fast_page = NULL;
         }
 
-        msleep_interruptible(500);
+        msleep_interruptible(5000);
     }
     return 0;
 }
