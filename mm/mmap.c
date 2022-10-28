@@ -279,7 +279,7 @@ SYSCALL_DEFINE1(brk, unsigned long, brk)
 		vm_flags = VM_DATA_DEFAULT_FLAGS | VM_ACCOUNT | mm->def_flags
 			| VM_SHARED | VM_MAYSHARE;
 		mmap_region(f, oldbrk, newbrk-oldbrk, vm_flags, 0, NULL);
-		fom_register_file(current->tgid, f, oldbrk, newbrk-oldbrk, 0);
+		fom_register_file(current->tgid, f, oldbrk, newbrk-oldbrk);
 	} else {
 		if (do_brk_flags(oldbrk, newbrk-oldbrk, 0, &uf) < 0)
 			goto out;
@@ -1622,7 +1622,7 @@ unsigned long do_mmap(struct file *file, unsigned long addr,
 	// This is to prevent a fom file from being registered and then an overlapping
 	// region is unmapped, making the fom system think it needs to delete the new file
 	if (created_fom_file) {
-		fom_register_file(current->tgid, file, addr, len, flags);
+		fom_register_file(current->tgid, file, addr, len);
 	}
 	return addr;
 }

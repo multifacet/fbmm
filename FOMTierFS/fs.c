@@ -185,7 +185,7 @@ static pte_t *fomtierfs_find_pte(struct vm_area_struct *vma, u64 address)
         return NULL;
 
     pte = pte_offset_kernel(pmd, address);
-    if (!pte)
+    if (!pte || !pte_present(*pte))
         return NULL;
 
     return pte;
@@ -672,13 +672,7 @@ static long fomtierfs_fallocate(struct file *file, int mode, loff_t offset, loff
     struct inode *inode = file_inode(file);
     struct fomtierfs_sb_info *sbi = FTFS_SB(inode->i_sb);
     struct fomtierfs_inode_info *inode_info = FTFS_I(inode);
-    struct address_space *as = inode->i_mapping;
-    struct vm_area_struct *vma;
     struct fomtierfs_page *page;
-    u64 virt_addr;
-    u64 pfn;
-    pte_t *ptep;
-    pte_t pte;
     loff_t off;
 
     if (mode & FALLOC_FL_PUNCH_HOLE) {
@@ -689,41 +683,17 @@ static long fomtierfs_fallocate(struct file *file, int mode, loff_t offset, loff
 
     // Allocate and add mappings for the desired range
     for (off = offset; off < offset + len; off += PAGE_SIZE) {
-        // Get the page
         page = fomtierfs_alloc_page(inode, sbi, off >> PAGE_SHIFT);
         if (!page) {
             return -ENOMEM;
         }
 
-        // Set the page table for this page
-        spin_lock(&page->lock);
-        i_mmap_lock_read(as);
-
-        vma = vma_interval_tree_iter_first(&as->i_mmap, page->page_offset, page->page_offset);
-        virt_addr = vma->vm_start + (off - (vma->vm_pgoff << PAGE_SHIFT));
-        ptep = fomtierfs_find_pte(vma, virt_addr);
-
-        if (ptep) {
-            pfn = sbi->mem[page->type].pfn.val + page->page_num;
-            pte = pfn_pte(pfn, vma->vm_page_prot);
-            pte = pte_mkdevmap(pte);
-            if (vma->vm_flags & VM_WRITE)
-                pte = pte_mkwrite(pte);
-            set_pte_at(vma->vm_mm, virt_addr, ptep, pte);
-        }
-
-        i_mmap_unlock_read(as);
-        spin_unlock(&page->lock);
-
-        // Update the metadata to reflect the new mapping
         write_lock(&inode_info->map_lock);
         if (!fomtierfs_insert_page(&inode_info->page_maps, page)) {
             BUG();
         }
         write_unlock(&inode_info->map_lock);
-
     }
-    __flush_tlb_all();
 
     return 0;
 }
