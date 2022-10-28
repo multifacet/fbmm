@@ -208,6 +208,7 @@ struct file *fom_create_new_file(unsigned long len, unsigned long prot, int flag
 	struct file *f;
 	int open_flags = O_EXCL | O_TMPFILE;
 	umode_t open_mode = 0;
+	int ret = 0;
 	ktime_t start_time = ktime_get_ns();
 
 	// Determine what flags to use for the call to open
@@ -229,6 +230,13 @@ struct file *fom_create_new_file(unsigned long len, unsigned long prot, int flag
 	if (IS_ERR(f))
 		return NULL;
 
+	// Set the file to the correct size
+	ret = truncate_fom_file(f, len, flags);
+	if (ret) {
+		filp_close(f, current->files);
+		return NULL;
+	}
+
 	file_create_time += ktime_get_ns() - start_time;
 	num_file_creates++;
 
@@ -236,13 +244,12 @@ struct file *fom_create_new_file(unsigned long len, unsigned long prot, int flag
 }
 
 void fom_register_file(pid_t pid, struct file *f,
-		unsigned long start, unsigned long len, int flags)
+		unsigned long start, unsigned long len)
 {
 	struct fom_proc *proc;
 	struct fom_mapping *mapping = NULL;
 	struct fom_file *file = NULL;
 	bool new_proc = false;
-	int ret;
 	ktime_t start_time = ktime_get_ns();
 
 	down_read(&fom_procs_sem);
@@ -290,12 +297,6 @@ void fom_register_file(pid_t pid, struct file *f,
 	if (new_proc)
 		insert_new_proc(proc);
 	up_write(&fom_procs_sem);
-
-	// Set the file to the correct size
-	ret = truncate_fom_file(f, len, flags);
-	if (ret) {
-		pr_err("Could not truncate FOM file!\n");
-	}
 
 	file_register_time += ktime_get_ns() - start_time;
 	num_file_registers++;
