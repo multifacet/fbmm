@@ -78,7 +78,6 @@ struct fomtierfs_page *fomtierfs_alloc_page(struct inode *inode, struct fomtierf
     page->last_accessed = true;
     spin_unlock(&page->lock);
 
-
     // Add the page to the active list
     list_add(&page->list, &prim->active_list);
     prim->active_pages++;
@@ -688,11 +687,11 @@ static long fomtierfs_fallocate(struct file *file, int mode, loff_t offset, loff
             return -ENOMEM;
         }
 
-        write_lock(&inode_info->map_lock);
+        // We normally need to grab inode_info->map_lock, but
+        // since this page is being fallocated, it isn't shared yet.
         if (!fomtierfs_insert_page(&inode_info->page_maps, page)) {
             BUG();
         }
-        write_unlock(&inode_info->map_lock);
     }
 
     return 0;
