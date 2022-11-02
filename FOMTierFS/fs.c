@@ -40,11 +40,43 @@ struct fomtierfs_inode_info *FTFS_I(struct inode *inode)
     return inode->i_private;
 }
 
+static inline void fomtierfs_nt_zero(void *kaddr)
+{
+	__asm__ (
+		"push %%rax;"
+		"push %%rcx;"
+		"push %%rdi;"
+		"movq   %0, %%rdi;"
+		"xorq    %%rax, %%rax;"
+		"movl    $4096/64, %%ecx;"
+		".p2align 4;"
+		"1:;"
+		"decl    %%ecx;"
+		"movnti  %%rax,(%%rdi);"
+		"movnti  %%rax,0x8(%%rdi);"
+		"movnti  %%rax,0x10(%%rdi);"
+		"movnti  %%rax,0x18(%%rdi);"
+		"movnti  %%rax,0x20(%%rdi);"
+		"movnti  %%rax,0x28(%%rdi);"
+		"movnti  %%rax,0x30(%%rdi);"
+		"movnti  %%rax,0x38(%%rdi);"
+		"leaq    64(%%rdi),%%rdi;"
+		"jnz     1b;"
+		"nop;"
+		"pop %%rdi;"
+		"pop %%rcx;"
+		"pop %%rax;"
+		: /* output */
+		: "a" (kaddr)
+	);
+}
+
 struct fomtierfs_page *fomtierfs_alloc_page(struct inode *inode, struct fomtierfs_sb_info *sbi, u64 page_offset)
 {
     struct fomtierfs_page *page;
     struct fomtierfs_dev_info *prim, *sec;
     void* virt_addr;
+    int i;
 
     // If the free memory in fast mem is greater than the alloc watermark,
     // alloc from fast mem, otherwise alloc from slow mem
@@ -86,7 +118,8 @@ struct fomtierfs_page *fomtierfs_alloc_page(struct inode *inode, struct fomtierf
     spin_unlock(&prim->lock);
 
     virt_addr = prim->virt_addr + (page->page_num << sbi->page_shift);
-    memset(virt_addr, 0, sbi->page_size);
+    for (i = 0; i < sbi->page_size / PAGE_SIZE; i++)
+        fomtierfs_nt_zero(virt_addr + (i << PAGE_SHIFT));
 
     return page;
 }
@@ -1019,8 +1052,6 @@ static int fomtierfs_fill_super(struct super_block *sb, struct fs_context *fc)
         sbi->page_size = HPAGE_SIZE;
         sbi->page_shift = HPAGE_SHIFT;
     }
-
-    pr_err("base pages %d\n", fc_info->base_pages);
 
     sb->s_fs_info = sbi;
     sb->s_maxbytes = MAX_LFS_FILESIZE;
