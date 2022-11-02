@@ -44,6 +44,7 @@ struct fomtierfs_page *fomtierfs_alloc_page(struct inode *inode, struct fomtierf
 {
     struct fomtierfs_page *page;
     struct fomtierfs_dev_info *prim, *sec;
+    void* virt_addr;
 
     // If the free memory in fast mem is greater than the alloc watermark,
     // alloc from fast mem, otherwise alloc from slow mem
@@ -84,7 +85,8 @@ struct fomtierfs_page *fomtierfs_alloc_page(struct inode *inode, struct fomtierf
 
     spin_unlock(&prim->lock);
 
-    clear_page(prim->virt_addr + (page->page_num << PAGE_SHIFT));
+    virt_addr = prim->virt_addr + (page->page_num << sbi->page_shift);
+    memset(virt_addr, 0, sbi->page_size);
 
     return page;
 }
@@ -119,8 +121,8 @@ static long fomtierfs_free_range(struct inode *inode, loff_t offset, loff_t len)
     struct fomtierfs_inode_info *inode_info = FTFS_I(inode);
     struct rb_node *node, *next_node;
     struct fomtierfs_page *page;
-    u64 page_offset = offset >> PAGE_SHIFT;
-    u64 num_pages = len >> PAGE_SHIFT;
+    u64 page_offset = offset >> sbi->page_shift;
+    u64 num_pages = len >> sbi->page_shift;
 
     write_lock(&inode_info->map_lock);
     // TODO: Change this to instead of needing the page at the offset,
@@ -234,7 +236,8 @@ static void fomtierfs_demote_one(struct fomtierfs_sb_info *sbi, struct fomtierfs
         spin_unlock(&fast_dev->lock);
         return;
     }
-    virt_addr = vma->vm_start + ((page->page_offset - vma->vm_pgoff) << PAGE_SHIFT);
+    virt_addr = vma->vm_start
+        + ((page->page_offset << sbi->page_shift) - (vma->vm_pgoff << PAGE_SHIFT));
     ptep = fomtierfs_find_pte(vma, virt_addr);
     if (!ptep || !pte_present(*ptep)) {
         list_add(&page->list, &fast_dev->active_list);
@@ -291,9 +294,9 @@ static void fomtierfs_demote_one(struct fomtierfs_sb_info *sbi, struct fomtierfs
     __flush_tlb_all();
 
     // Copy the page
-    fast_kaddr = fast_dev->virt_addr + (page->page_num << PAGE_SHIFT);
-    slow_kaddr = slow_dev->virt_addr + ((*slow_page)->page_num << PAGE_SHIFT);
-    copy_page(slow_kaddr, fast_kaddr);
+    fast_kaddr = fast_dev->virt_addr + (page->page_num << sbi->page_shift);
+    slow_kaddr = slow_dev->virt_addr + ((*slow_page)->page_num << sbi->page_shift);
+    memcpy(slow_kaddr, fast_kaddr, sbi->page_size);
 
     // Copy the metadata
     (*slow_page)->page_offset = page->page_offset;
@@ -377,7 +380,8 @@ static void fomtierfs_promote_one(struct fomtierfs_sb_info *sbi, struct fomtierf
         spin_unlock(&slow_dev->lock);
         return;
     }
-    virt_addr = vma->vm_start + ((page->page_offset - vma->vm_pgoff) << PAGE_SHIFT);
+    virt_addr = vma->vm_start
+        + ((page->page_offset << sbi->page_shift)- (vma->vm_pgoff << PAGE_SHIFT));
     ptep = fomtierfs_find_pte(vma, virt_addr);
     if (!ptep || !pte_present(*ptep)) {
         list_add(&page->list, &slow_dev->active_list);
@@ -431,9 +435,9 @@ static void fomtierfs_promote_one(struct fomtierfs_sb_info *sbi, struct fomtierf
     __flush_tlb_all();
 
     // Copy the page
-    fast_kaddr = fast_dev->virt_addr + ((*fast_page)->page_num << PAGE_SHIFT);
-    slow_kaddr = slow_dev->virt_addr + (page->page_num << PAGE_SHIFT);
-    copy_page(fast_kaddr, slow_kaddr);
+    fast_kaddr = fast_dev->virt_addr + ((*fast_page)->page_num << sbi->page_shift);
+    slow_kaddr = slow_dev->virt_addr + (page->page_num << sbi->page_shift);
+    memcpy(fast_kaddr, slow_kaddr, sbi->page_size);
 
     // Copy the metadata
     (*fast_page)->page_offset = page->page_offset;
@@ -577,8 +581,17 @@ static int fomtierfs_iomap_begin(struct inode *inode, loff_t offset, loff_t leng
     struct fomtierfs_page *page;
     u64 page_offset;
     u64 page_shift;
+    u64 base_page_offset;
 
-    page_shift = inode->i_sb->s_blocksize_bits;
+    // If we are in huge page mode, and there is a base page fault,
+    // we will need to find which base page in the huge page we should map
+    if (sbi->page_size == HPAGE_SIZE) {
+        base_page_offset = offset & (HPAGE_SIZE-1);
+    } else {
+        base_page_offset = 0;
+    }
+
+    page_shift = sbi->page_shift;
     // Calculate the "page" the offset belongs to
     page_offset = offset >> page_shift;
 
@@ -605,14 +618,14 @@ static int fomtierfs_iomap_begin(struct inode *inode, loff_t offset, loff_t leng
 
         iomap->flags |= IOMAP_F_NEW;
         iomap->type = IOMAP_MAPPED;
-        iomap->addr = page->page_num << page_shift;
+        iomap->addr = (page->page_num << page_shift) + base_page_offset;
         iomap->bdev = sbi->mem[page->type].bdev;
         iomap->dax_dev = sbi->mem[page->type].daxdev;
         write_unlock(&inode_info->map_lock);
     } else {
         // There is already a page allocated for this offset, so just use that
         iomap->type = IOMAP_MAPPED;
-        iomap->addr = page->page_num << page_shift;
+        iomap->addr = (page->page_num << page_shift) + base_page_offset;
         iomap->bdev = sbi->mem[page->type].bdev;
         iomap->dax_dev = sbi->mem[page->type].daxdev;
 
@@ -633,19 +646,25 @@ const struct iomap_ops fomtierfs_iomap_ops = {
     .iomap_end = fomtierfs_iomap_end,
 };
 
-static vm_fault_t fomtierfs_fault(struct vm_fault *vmf)
+static vm_fault_t fomtierfs_huge_fault(struct vm_fault *vmf, enum page_entry_size pe_size)
 {
     vm_fault_t result = 0;
     pfn_t pfn;
     int error;
 
-    result = dax_iomap_fault(vmf, PE_SIZE_PTE, &pfn, &error, &fomtierfs_iomap_ops);
+    result = dax_iomap_fault(vmf, pe_size, &pfn, &error, &fomtierfs_iomap_ops);
 
     return result;
 }
 
+static vm_fault_t fomtierfs_fault(struct vm_fault *vmf)
+{
+    return fomtierfs_huge_fault(vmf, PE_SIZE_PTE);
+}
+
 static struct vm_operations_struct fomtierfs_vm_ops = {
     .fault = fomtierfs_fault,
+    .huge_fault = fomtierfs_huge_fault,
     .page_mkwrite = fomtierfs_fault,
     .pfn_mkwrite = fomtierfs_fault,
 };
@@ -663,7 +682,7 @@ static unsigned long fomtierfs_mmu_get_unmapped_area(struct file *file,
 		unsigned long addr, unsigned long len, unsigned long pgoff,
 		unsigned long flags)
 {
-	return current->mm->get_unmapped_area(file, addr, len, pgoff, flags);
+    return thp_get_unmapped_area(file, addr, len, pgoff, flags);
 }
 
 static long fomtierfs_fallocate(struct file *file, int mode, loff_t offset, loff_t len)
@@ -681,8 +700,8 @@ static long fomtierfs_fallocate(struct file *file, int mode, loff_t offset, loff
     }
 
     // Allocate and add mappings for the desired range
-    for (off = offset; off < offset + len; off += PAGE_SIZE) {
-        page = fomtierfs_alloc_page(inode, sbi, off >> PAGE_SHIFT);
+    for (off = offset; off < offset + len; off += sbi->page_size) {
+        page = fomtierfs_alloc_page(inode, sbi, off >> sbi->page_shift);
         if (!page) {
             return -ENOMEM;
         }
@@ -827,7 +846,7 @@ static int fomtierfs_statfs(struct dentry *dentry, struct kstatfs *buf)
     struct fomtierfs_sb_info *sbi = FTFS_SB(sb);
 
     buf->f_type = sb->s_magic;
-    buf->f_bsize = PAGE_SIZE;
+    buf->f_bsize = sbi->page_size;
     buf->f_blocks = sbi->mem[FAST_MEM].num_pages + sbi->mem[SLOW_MEM].num_pages;
     buf->f_bfree = buf->f_bavail = sbi->mem[FAST_MEM].free_pages + sbi->mem[SLOW_MEM].num_pages;
     buf->f_files = LONG_MAX;
@@ -879,18 +898,20 @@ static const struct super_operations fomtierfs_ops = {
 };
 
 enum fomtierfs_param {
-    Opt_slowmem, Opt_source
+    Opt_slowmem, Opt_source, Opt_basepage,
 };
 
 const struct fs_parameter_spec fomtierfs_fs_parameters[] = {
     fsparam_string("slowmem", Opt_slowmem),
     fsparam_string("source", Opt_source),
+    fsparam_bool("basepage", Opt_basepage),
     {},
 };
 
 static int fomtierfs_parse_param(struct fs_context *fc, struct fs_parameter *param)
 {
     struct fs_parse_result result;
+    struct fomtierfs_context_info *fc_info = (struct fomtierfs_context_info*)fc->fs_private;
     int opt;
 
     opt = fs_parse(fc, fomtierfs_fs_parameters, param, &result);
@@ -908,10 +929,13 @@ static int fomtierfs_parse_param(struct fs_context *fc, struct fs_parameter *par
 
     switch(opt) {
     case Opt_slowmem:
-        fc->fs_private = kstrdup(param->string, GFP_KERNEL);
+        fc_info->slow_dev_name = kstrdup(param->string, GFP_KERNEL);
         break;
     case Opt_source:
         fc->source = kstrdup(param->string, GFP_KERNEL);
+        break;
+    case Opt_basepage:
+        fc_info->base_pages = result.boolean;
         break;
     default:
         pr_err("FOMTierFS: unrecognized option %s", param->key);
@@ -921,33 +945,38 @@ static int fomtierfs_parse_param(struct fs_context *fc, struct fs_parameter *par
     return 0;
 }
 
-static int fomtierfs_populate_dev_info(struct fomtierfs_dev_info *di, struct block_device *bdev, enum fomtierfs_mem_type type)
+static int fomtierfs_populate_dev_info(struct fomtierfs_sb_info *sbi, struct block_device *bdev, enum fomtierfs_mem_type type)
 {
     int ret = 0;
     long i;
-    long num_pages;
+    long num_base_pages;
+    struct fomtierfs_dev_info *di = &sbi->mem[type];
     struct fomtierfs_page *cursor, *temp;
+    // dax_direct_access returns the number of base pages.
+    // We want to work with pages of the size sbi->page_size, so calcualate
+    // this ratio to convert between them.
+    unsigned long page_size_ratio = sbi->page_size / PAGE_SIZE;
 
     di->bdev = bdev;
     di->daxdev = fs_dax_get_by_bdev(bdev);
 
     // Determine how many pages are in the device
-    num_pages = dax_direct_access(di->daxdev, 0, LONG_MAX / PAGE_SIZE,
+    num_base_pages = dax_direct_access(di->daxdev, 0, LONG_MAX / PAGE_SIZE,
                     &di->virt_addr, &di->pfn);
-    if (num_pages <= 0) {
+    if (num_base_pages <= 0) {
         pr_err("FOMTierFS: Determining device size failed");
         return -EIO;
     }
 
-    di->num_pages = num_pages;
-    di->free_pages = num_pages;
+    di->num_pages = num_base_pages / page_size_ratio;
+    di->free_pages = num_base_pages / page_size_ratio;
     di->active_pages = 0;
 
     INIT_LIST_HEAD(&di->free_list);
     INIT_LIST_HEAD(&di->active_list);
 
     // Put all of the pages into the free list
-    for (i = 0; i < num_pages; i++) {
+    for (i = 0; i < di->num_pages; i++) {
         struct fomtierfs_page *page = kzalloc(sizeof(struct fomtierfs_page), GFP_KERNEL);
         if (!page) {
             ret = -ENOMEM;
@@ -980,36 +1009,45 @@ static int fomtierfs_fill_super(struct super_block *sb, struct fs_context *fc)
     struct inode *inode;
     struct block_device *slow_dev;
     struct fomtierfs_sb_info *sbi = kzalloc(sizeof(struct fomtierfs_sb_info), GFP_KERNEL);
-    char *slow_dev_name = fc->fs_private;
+    struct fomtierfs_context_info *fc_info = (struct fomtierfs_context_info*)fc->fs_private;
     int ret;
+
+    if (fc_info->base_pages) {
+        sbi->page_size = PAGE_SIZE;
+        sbi->page_shift = PAGE_SHIFT;
+    } else {
+        sbi->page_size = HPAGE_SIZE;
+        sbi->page_shift = HPAGE_SHIFT;
+    }
+
+    pr_err("base pages %d\n", fc_info->base_pages);
 
     sb->s_fs_info = sbi;
     sb->s_maxbytes = MAX_LFS_FILESIZE;
-    sb->s_blocksize = PAGE_SIZE;
-    sb->s_blocksize_bits = PAGE_SHIFT;
     sb->s_magic = 0xDEADBEEF;
     sb->s_op = &fomtierfs_ops;
     sb->s_time_gran = 1;
+    // The blocksize cannot be larger than PAGE_SIZE
     if(!sb_set_blocksize(sb, PAGE_SIZE)) {
         pr_err("FOMTierFS: error setting blocksize");
     }
 
     // Populate the device information for the fast and slow mem
-    ret = fomtierfs_populate_dev_info(&sbi->mem[FAST_MEM], sb->s_bdev, FAST_MEM);
+    ret = fomtierfs_populate_dev_info(sbi, sb->s_bdev, FAST_MEM);
     if (ret != 0) {
         pr_err("FOMTierFS: Error populating fast mem device information");
         kfree(sbi);
         return ret;
     }
 
-    slow_dev = blkdev_get_by_path(slow_dev_name, FMODE_READ|FMODE_WRITE|FMODE_EXCL, sbi);
+    slow_dev = blkdev_get_by_path(fc_info->slow_dev_name, FMODE_READ|FMODE_WRITE|FMODE_EXCL, sbi);
     if (IS_ERR(slow_dev)) {
         ret = PTR_ERR(slow_dev);
-        pr_err("FOMTierFS: Error opening slow mem device %s %d", slow_dev_name, ret);
+        pr_err("FOMTierFS: Error opening slow mem device %s %d", fc_info->slow_dev_name, ret);
         kfree(sbi);
         return ret;
     }
-    ret = fomtierfs_populate_dev_info(&sbi->mem[SLOW_MEM], slow_dev, SLOW_MEM);
+    ret = fomtierfs_populate_dev_info(sbi, slow_dev, SLOW_MEM);
     if (ret != 0) {
         pr_err("FOMTierFS: Error populating slow mem device information");
         kfree(sbi);
@@ -1050,6 +1088,9 @@ static int fomtierfs_get_tree(struct fs_context *fc)
 
 static void fomtierfs_free_fc(struct fs_context *fc)
 {
+    struct fomtierfs_context_info *fc_info = (struct fomtierfs_context_info*)fc->fs_private;
+    kfree(fc_info->slow_dev_name);
+    kfree(fc_info);
 }
 
 static const struct fs_context_operations fomtierfs_context_ops = {
@@ -1061,6 +1102,8 @@ static const struct fs_context_operations fomtierfs_context_ops = {
 int fomtierfs_init_fs_context(struct fs_context *fc)
 {
     fc->ops = &fomtierfs_context_ops;
+    // Zeroing sets fc_info->base_pages to false by default
+    fc->fs_private = kzalloc(sizeof(struct fomtierfs_context_info), GFP_KERNEL);
     return 0;
 }
 

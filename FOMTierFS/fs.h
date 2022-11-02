@@ -54,11 +54,19 @@ struct fomtierfs_sb_info {
     u64 demotion_watermark;
     // Stop allocating from fast_mem if it has less than alloc_watermark% of memory free
     u64 alloc_watermark;
+    // The pagesize to work with
+    unsigned long page_size;
+    unsigned char page_shift;
 };
 
 struct fomtierfs_inode_info {
     struct rb_root page_maps; // Mapping of offset page to dax page
     rwlock_t map_lock;
+};
+
+struct fomtierfs_context_info {
+    char *slow_dev_name;
+    bool base_pages;
 };
 
 struct fomtierfs_sb_info *FTFS_SB(struct super_block *sb);
