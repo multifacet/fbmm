@@ -234,6 +234,7 @@ static void fomtierfs_demote_one(struct fomtierfs_sb_info *sbi, struct fomtierfs
     struct vm_area_struct *vma;
     struct address_space *as;
     bool accessed, last_accessed;
+    bool writeable;
     u64 virt_addr;
     u64 slow_pfn;
     void *fast_kaddr, *slow_kaddr;
@@ -322,6 +323,7 @@ static void fomtierfs_demote_one(struct fomtierfs_sb_info *sbi, struct fomtierfs
     // Start by write protecting the page we're copying.
     // If the application faults on this page, we hold the inode write lock,
     // so the fault should stall in iomap_begin until we're done copying.
+    writeable = pte_write(*ptep);
     pte = pte_wrprotect(*ptep);
     set_pte_at(vma->vm_mm, virt_addr, ptep, pte);
     __flush_tlb_all();
@@ -347,6 +349,8 @@ static void fomtierfs_demote_one(struct fomtierfs_sb_info *sbi, struct fomtierfs
     slow_pfn = slow_dev->pfn.val + (*slow_page)->page_num;
     pte = pfn_pte(slow_pfn, pte_pgprot(*ptep));
     pte = pte_mkold(pte);
+    if (writeable)
+        pte = pte_mkwrite(pte);
     set_pte_at(vma->vm_mm, virt_addr, ptep, pte);
     __flush_tlb_all();
 
@@ -378,6 +382,7 @@ static void fomtierfs_promote_one(struct fomtierfs_sb_info *sbi, struct fomtierf
     struct vm_area_struct *vma;
     struct address_space *as;
     bool accessed, last_accessed;
+    bool writeable;
     u64 virt_addr;
     u64 fast_pfn;
     void *fast_kaddr, *slow_kaddr;
@@ -463,6 +468,7 @@ static void fomtierfs_promote_one(struct fomtierfs_sb_info *sbi, struct fomtierf
     // Start by write protecting the page we're copying.
     // If the application faults on this page, we hold the inode write lock,
     // so the fault should stall in iomap_begin until we're done copying.
+    writeable = pte_write(*ptep);
     pte = pte_wrprotect(*ptep);
     set_pte_at(vma->vm_mm, virt_addr, ptep, pte);
     __flush_tlb_all();
@@ -488,6 +494,8 @@ static void fomtierfs_promote_one(struct fomtierfs_sb_info *sbi, struct fomtierf
     fast_pfn = fast_dev->pfn.val + (*fast_page)->page_num;
     pte = pfn_pte(fast_pfn, pte_pgprot(*ptep));
     pte = pte_mkold(pte);
+    if (writeable)
+        pte = pte_mkwrite(pte);
     set_pte_at(vma->vm_mm, virt_addr, ptep, pte);
     __flush_tlb_all();
 
