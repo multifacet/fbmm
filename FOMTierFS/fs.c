@@ -1228,9 +1228,38 @@ static ssize_t active_list_store(struct kobject *kobj,
 static struct kobj_attribute active_list_attr =
 __ATTR(active_list, 0444, active_list_show, active_list_store);
 
+static ssize_t demotion_watermark_show(struct kobject *kobj,
+        struct kobj_attribute *attr, char *buf)
+{
+    if (!sysfs_sb_info) {
+        return sprintf(buf, "Not mounted");
+    }
+
+    return sprintf(buf, "%lld\n", sysfs_sb_info->demotion_watermark);
+}
+
+static ssize_t demotion_watermark_store(struct kobject *kobj,
+        struct kobj_attribute *attr,
+        const char *buf, size_t count)
+{
+    int ret;
+    if (!sysfs_sb_info) {
+        return -EINVAL;
+    }
+
+    ret =  kstrtoull(buf, 10, &sysfs_sb_info->demotion_watermark);
+    if (ret)
+        return ret;
+
+    return count;
+}
+static struct kobj_attribute demotion_watermark_attr =
+__ATTR(demotion_watermark, 0644, demotion_watermark_show, demotion_watermark_store);
+
 static struct attribute *fomtierfs_attr[] = {
     &usage_attr.attr,
     &active_list_attr.attr,
+    &demotion_watermark_attr.attr,
     NULL,
 };
 
