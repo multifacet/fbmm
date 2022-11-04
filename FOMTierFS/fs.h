@@ -24,6 +24,9 @@ enum fomtierfs_mem_type {
 struct fomtierfs_page {
     u64 page_num; // The physical page number within the device
     u64 page_offset; // The page offset within the file
+    // If we are using huge pages, but an allocation only uses base pages,
+    // this represents the number of base pages in this page
+    u16 num_base_pages;
     struct inode *inode; // If the file is allocated, the inode it belongs to. Else null.
     bool last_accessed; // Whether the accessed bit was set last time it was checked
     enum fomtierfs_mem_type type; // Whether this page is in fast or slow mem

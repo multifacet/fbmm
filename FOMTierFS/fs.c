@@ -17,6 +17,7 @@
 #include <linux/falloc.h>
 #include <linux/kthread.h>
 #include <linux/delay.h>
+#include <linux/hugetlb.h>
 
 #include <asm/tlbflush.h>
 
@@ -107,6 +108,7 @@ struct fomtierfs_page *fomtierfs_alloc_page(struct inode *inode, struct fomtierf
 
     spin_lock(&page->lock);
     page->page_offset = page_offset;
+    page->num_base_pages = 0;
     page->inode = inode;
     page->last_accessed = true;
     spin_unlock(&page->lock);
@@ -138,6 +140,7 @@ void fomtierfs_return_page(struct fomtierfs_sb_info *sbi, struct fomtierfs_page 
 
     spin_lock(&page->lock);
     page->page_offset = 0;
+    page->num_base_pages = 0;
     page->inode = NULL;
     spin_unlock(&page->lock);
 
@@ -191,13 +194,12 @@ static long fomtierfs_free_range(struct inode *inode, loff_t offset, loff_t len)
     return 0;
 }
 
-static pte_t *fomtierfs_find_pte(struct vm_area_struct *vma, u64 address)
+static pmd_t *fomtierfs_find_pmd(struct vm_area_struct *vma, u64 address)
 {
     pgd_t *pgd;
     p4d_t *p4d;
     pud_t *pud;
     pmd_t *pmd;
-    pte_t *pte;
 
     if (address >= vma->vm_end)
         return NULL;
@@ -215,14 +217,134 @@ static pte_t *fomtierfs_find_pte(struct vm_area_struct *vma, u64 address)
         return NULL;
 
     pmd = pmd_offset(pud, address);
-    if (pmd_none(*pmd) || pmd_bad(*pmd))
-        return NULL;
 
-    pte = pte_offset_kernel(pmd, address);
-    if (!pte || !pte_present(*pte))
-        return NULL;
+    return pmd;
+}
 
-    return pte;
+// The locks for to_page and from_page should be taken.
+// The inode_info->map_lock should be taken in write mode
+static void migrate_page(struct fomtierfs_sb_info *sbi, struct fomtierfs_inode_info *inode_info,
+        struct fomtierfs_page *to_page, struct fomtierfs_page *from_page,
+        struct vm_area_struct *vma, unsigned long virt_addr, pmd_t *pmdp)
+{
+    struct fomtierfs_dev_info *to_dev, *from_dev;
+    void *to_addr, *from_addr;
+    bool writeable = false;
+    int i;
+    pmd_t pmd;
+    pte_t *ptep;
+    pte_t pte;
+    u64 new_pfn;
+
+    to_dev = &sbi->mem[to_page->type];
+    from_dev = &sbi->mem[from_page->type];
+
+    // Start by write protecting the page we're copying.
+    // If the application faults on this page, we hold the inode write lock,
+    // so the fault should stall in iomap_begin until we're done copying.
+    if (pmd_huge(*pmdp)) {
+        writeable = pmd_write(*pmdp);
+        pmd = pmd_wrprotect(*pmdp);
+        set_pmd_at(vma->vm_mm, virt_addr, pmdp, pmd);
+    } else {
+        for(i = 0; i < from_page->num_base_pages; i++) {
+            ptep = pte_offset_kernel(pmdp, virt_addr + (i << PAGE_SHIFT));
+            if (!ptep || !pte_present(*ptep))
+                continue;
+
+            writeable = writeable || pte_write(*ptep);
+            pte = pte_wrprotect(*ptep);
+            set_pte_at(vma->vm_mm, virt_addr, ptep, pte);
+        }
+    }
+    __flush_tlb_all();
+
+    // Copy the page
+    to_addr = to_dev->virt_addr + (to_page->page_num << sbi->page_shift);
+    from_addr = from_dev->virt_addr + (from_page->page_num << sbi->page_shift);
+    memcpy(to_addr, from_addr, sbi->page_size);
+
+    // Copy the metadata
+    to_page->page_offset = from_page->page_offset;
+    to_page->num_base_pages = from_page->num_base_pages;
+    to_page->inode = from_page->inode;
+    to_page->last_accessed = false;
+
+    // Replace the olf page with the new page in the map tree
+    fomtierfs_replace_page(&inode_info->page_maps, to_page);
+
+    // The from page is about to be put in the free list, so clear it
+    from_page->page_offset = 0;
+    from_page->num_base_pages = 0;
+    from_page->inode = NULL;
+
+    // Update the page table to point to the new page
+    if (pmd_huge(*pmdp)) {
+        new_pfn = to_dev->pfn.val + (to_page->page_num << (HPAGE_SHIFT - PAGE_SHIFT));
+        pmd = pfn_pmd(new_pfn, pmd_pgprot(*pmdp));
+        pmd = pmd_mkold(pmd);
+        if (writeable)
+            pmd = pmd_mkwrite(pmd);
+        set_pmd_at(vma->vm_mm, virt_addr, pmdp, pmd);
+    } else {
+        for (i = 0; i < to_page->num_base_pages; i++) {
+            new_pfn = to_dev->pfn.val + (to_page->page_num << (sbi->page_shift - PAGE_SHIFT)) + i;
+            ptep = pte_offset_kernel(pmdp, virt_addr + (i << PAGE_SHIFT));
+            if (!ptep || !pte_present(*ptep))
+                continue;
+
+            pte = pfn_pte(new_pfn, pte_pgprot(*ptep));
+            pte = pte_mkold(pte);
+            if (writeable)
+                pte = pte_mkwrite(pte);
+            set_pte_at(vma->vm_mm, virt_addr + (i << PAGE_SHIFT), ptep, pte);
+        }
+    }
+    __flush_tlb_all();
+}
+
+static bool fomtierfs_page_accessed(struct fomtierfs_page *page, u64 virt_addr, pmd_t *pmdp)
+{
+    int i;
+    pte_t *ptep;
+
+    if (pmd_huge(*pmdp)) {
+        return pmd_young(*pmdp);
+    } else {
+        for (i = 0; i < page->num_base_pages; i++) {
+            ptep = pte_offset_kernel(pmdp, virt_addr + (i << PAGE_SHIFT));
+            if (!ptep || !pte_present(*ptep))
+                continue;
+
+            if (pte_young(*ptep))
+                return true;
+        }
+    }
+
+    return false;
+}
+
+static void fomtierfs_page_mkold(struct vm_area_struct *vma, struct fomtierfs_page *page,
+        u64 virt_addr, pmd_t *pmdp)
+{
+    int i;
+    pmd_t pmd;
+    pte_t *ptep;
+    pte_t pte;
+
+    if (pmd_huge(*pmdp)) {
+        pmd = pmd_mkold(*pmdp);
+        set_pmd_at(vma->vm_mm, virt_addr, pmdp, pmd);
+    } else {
+        for (i = 0; i < page->num_base_pages; i++) {
+            ptep = pte_offset_kernel(pmdp, virt_addr + (i << PAGE_SHIFT));
+            if (!ptep || !pte_present(*ptep))
+                continue;
+
+            pte = pte_mkold(*ptep);
+            set_pte_at(vma->vm_mm, virt_addr + (i << PAGE_SHIFT), ptep, pte);
+        }
+    }
 }
 
 static void fomtierfs_demote_one(struct fomtierfs_sb_info *sbi, struct fomtierfs_page **slow_page)
@@ -234,12 +356,8 @@ static void fomtierfs_demote_one(struct fomtierfs_sb_info *sbi, struct fomtierfs
     struct vm_area_struct *vma;
     struct address_space *as;
     bool accessed, last_accessed;
-    bool writeable;
     u64 virt_addr;
-    u64 slow_pfn;
-    void *fast_kaddr, *slow_kaddr;
-    pte_t *ptep;
-    pte_t pte;
+    pmd_t *pmdp;
 
     // Grab the page at the end of the active list
     spin_lock(&fast_dev->lock);
@@ -272,8 +390,8 @@ static void fomtierfs_demote_one(struct fomtierfs_sb_info *sbi, struct fomtierfs
     }
     virt_addr = vma->vm_start
         + ((page->page_offset << sbi->page_shift) - (vma->vm_pgoff << PAGE_SHIFT));
-    ptep = fomtierfs_find_pte(vma, virt_addr);
-    if (!ptep || !pte_present(*ptep)) {
+    pmdp = fomtierfs_find_pmd(vma, virt_addr);
+    if (!pmdp || !pmd_present(*pmdp)) {
         list_add(&page->list, &fast_dev->active_list);
         fast_dev->active_pages++;
 
@@ -283,15 +401,14 @@ static void fomtierfs_demote_one(struct fomtierfs_sb_info *sbi, struct fomtierfs
         return;
     }
 
-    accessed = pte_young(*ptep);
+    accessed = fomtierfs_page_accessed(page, virt_addr, pmdp);
     last_accessed = page->last_accessed;
     page->last_accessed = accessed;
 
     // Only demote if this page hasn't been accessed in either of
     // the last couple of checks
     if (accessed || last_accessed) {
-        pte = pte_mkold(*ptep);
-        set_pte_at(vma->vm_mm, virt_addr, ptep, pte);
+        fomtierfs_page_mkold(vma, page, virt_addr, pmdp);
 
         // The page was accessed recently, so put it back and move
         // on to the next one.
@@ -320,39 +437,7 @@ static void fomtierfs_demote_one(struct fomtierfs_sb_info *sbi, struct fomtierfs
     inode_info = FTFS_I(page->inode);
     write_lock(&inode_info->map_lock);
 
-    // Start by write protecting the page we're copying.
-    // If the application faults on this page, we hold the inode write lock,
-    // so the fault should stall in iomap_begin until we're done copying.
-    writeable = pte_write(*ptep);
-    pte = pte_wrprotect(*ptep);
-    set_pte_at(vma->vm_mm, virt_addr, ptep, pte);
-    __flush_tlb_all();
-
-    // Copy the page
-    fast_kaddr = fast_dev->virt_addr + (page->page_num << sbi->page_shift);
-    slow_kaddr = slow_dev->virt_addr + ((*slow_page)->page_num << sbi->page_shift);
-    memcpy(slow_kaddr, fast_kaddr, sbi->page_size);
-
-    // Copy the metadata
-    (*slow_page)->page_offset = page->page_offset;
-    (*slow_page)->inode = page->inode;
-    (*slow_page)->last_accessed = false;
-
-    // Replace the old page with the new page in the map tree
-    fomtierfs_replace_page(&inode_info->page_maps, *slow_page);
-
-    // The fast page is about to be put in the free list soon, so clear it
-    page->page_offset = 0;
-    page->inode = NULL;
-
-    // Update the pte to point to the slow page
-    slow_pfn = slow_dev->pfn.val + (*slow_page)->page_num;
-    pte = pfn_pte(slow_pfn, pte_pgprot(*ptep));
-    pte = pte_mkold(pte);
-    if (writeable)
-        pte = pte_mkwrite(pte);
-    set_pte_at(vma->vm_mm, virt_addr, ptep, pte);
-    __flush_tlb_all();
+    migrate_page(sbi, inode_info, *slow_page, page, vma, virt_addr, pmdp);
 
     write_unlock(&inode_info->map_lock);
     spin_unlock(&(*slow_page)->lock);
@@ -382,12 +467,8 @@ static void fomtierfs_promote_one(struct fomtierfs_sb_info *sbi, struct fomtierf
     struct vm_area_struct *vma;
     struct address_space *as;
     bool accessed, last_accessed;
-    bool writeable;
     u64 virt_addr;
-    u64 fast_pfn;
-    void *fast_kaddr, *slow_kaddr;
-    pte_t *ptep;
-    pte_t pte;
+    pmd_t *pmdp;
 
     // Grab the page at the end of the active list
     spin_lock(&slow_dev->lock);
@@ -420,8 +501,8 @@ static void fomtierfs_promote_one(struct fomtierfs_sb_info *sbi, struct fomtierf
     }
     virt_addr = vma->vm_start
         + ((page->page_offset << sbi->page_shift)- (vma->vm_pgoff << PAGE_SHIFT));
-    ptep = fomtierfs_find_pte(vma, virt_addr);
-    if (!ptep || !pte_present(*ptep)) {
+    pmdp = fomtierfs_find_pmd(vma, virt_addr);
+    if (!pmdp || !pmd_present(*pmdp)) {
         list_add(&page->list, &slow_dev->active_list);
         slow_dev->active_pages++;
 
@@ -431,7 +512,7 @@ static void fomtierfs_promote_one(struct fomtierfs_sb_info *sbi, struct fomtierf
         return;
     }
 
-    accessed = pte_young(*ptep);
+    accessed = fomtierfs_page_accessed(page, virt_addr, pmdp);
     last_accessed = page->last_accessed;
     page->last_accessed = accessed;
 
@@ -440,6 +521,8 @@ static void fomtierfs_promote_one(struct fomtierfs_sb_info *sbi, struct fomtierf
     if (!accessed || !last_accessed) {
         // The page was not accessed recently, so put it back and move
         // on to the next one.
+        fomtierfs_page_accessed(page, virt_addr, pmdp);
+
         list_add(&page->list, &slow_dev->active_list);
         slow_dev->active_pages++;
 
@@ -465,39 +548,7 @@ static void fomtierfs_promote_one(struct fomtierfs_sb_info *sbi, struct fomtierf
     inode_info = FTFS_I(page->inode);
     write_lock(&inode_info->map_lock);
 
-    // Start by write protecting the page we're copying.
-    // If the application faults on this page, we hold the inode write lock,
-    // so the fault should stall in iomap_begin until we're done copying.
-    writeable = pte_write(*ptep);
-    pte = pte_wrprotect(*ptep);
-    set_pte_at(vma->vm_mm, virt_addr, ptep, pte);
-    __flush_tlb_all();
-
-    // Copy the page
-    fast_kaddr = fast_dev->virt_addr + ((*fast_page)->page_num << sbi->page_shift);
-    slow_kaddr = slow_dev->virt_addr + (page->page_num << sbi->page_shift);
-    memcpy(fast_kaddr, slow_kaddr, sbi->page_size);
-
-    // Copy the metadata
-    (*fast_page)->page_offset = page->page_offset;
-    (*fast_page)->inode = page->inode;
-    (*fast_page)->last_accessed = true;
-
-    // Replace the old page with the new page in the map tree
-    fomtierfs_replace_page(&inode_info->page_maps, *fast_page);
-
-    // The slow page is about to be put in the free list soon, so clear it
-    page->page_offset = 0;
-    page->inode = NULL;
-
-    // Update the pte to point to the slow page
-    fast_pfn = fast_dev->pfn.val + (*fast_page)->page_num;
-    pte = pfn_pte(fast_pfn, pte_pgprot(*ptep));
-    pte = pte_mkold(pte);
-    if (writeable)
-        pte = pte_mkwrite(pte);
-    set_pte_at(vma->vm_mm, virt_addr, ptep, pte);
-    __flush_tlb_all();
+    migrate_page(sbi, inode_info, *fast_page, page, vma, virt_addr, pmdp);
 
     write_unlock(&inode_info->map_lock);
     spin_unlock(&page->lock);
@@ -672,6 +723,7 @@ static int fomtierfs_iomap_begin(struct inode *inode, loff_t offset, loff_t leng
 
         read_unlock(&inode_info->map_lock);
     }
+    page->num_base_pages = max(page->num_base_pages, (u16)((base_page_offset >> PAGE_SHIFT) + 1));
 
     return 0;
 }
