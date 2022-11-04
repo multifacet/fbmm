@@ -29,6 +29,7 @@ int pmd_huge(pmd_t pmd)
 	return !pmd_none(pmd) &&
 		(pmd_val(pmd) & (_PAGE_PRESENT|_PAGE_PSE)) != _PAGE_PRESENT;
 }
+EXPORT_SYMBOL(pmd_huge);
 
 /*
  * pud_huge() returns 1 if @pud is hugetlb related entry, that is normal
