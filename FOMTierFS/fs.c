@@ -72,6 +72,47 @@ static inline void fomtierfs_nt_zero(void *kaddr)
 	);
 }
 
+static inline void fomtierfs_nt_copy(void *to, void *from)
+{
+	__asm__ (
+		"push %%rax;"
+		"push %%rcx;"
+		"push %%rdi;"
+		"movq    %0, %%rdi;"
+		"movq    %1, %%rax;"
+		"movl    $4096/64, %%ecx;"
+		".p2align 4;"
+		"1:;"
+		"decl    %%ecx;"
+        "movq    (%%rax), %%rbx;"
+		"movnti  %%rbx,(%%rdi);"
+        "movq    0x8(%%rax), %%rbx;"
+		"movnti  %%rbx,0x8(%%rdi);"
+        "movq    0x10(%%rax), %%rbx;"
+		"movnti  %%rbx,0x10(%%rdi);"
+        "movq    0x18(%%rax), %%rbx;"
+		"movnti  %%rbx,0x18(%%rdi);"
+        "movq    0x20(%%rax), %%rbx;"
+		"movnti  %%rbx,0x20(%%rdi);"
+        "movq    0x28(%%rax), %%rbx;"
+		"movnti  %%rbx,0x28(%%rdi);"
+        "movq    0x30(%%rax), %%rbx;"
+		"movnti  %%rbx,0x30(%%rdi);"
+        "movq    0x38(%%rax), %%rbx;"
+		"movnti  %%rbx,0x38(%%rdi);"
+		"leaq    64(%%rdi),%%rdi;"
+        "leaq    64(%%rax),%%rax;"
+		"jnz     1b;"
+		"nop;"
+		"pop %%rdi;"
+		"pop %%rcx;"
+		"pop %%rax;"
+		: /* output */
+		: "r" (to), "r" (from)
+        : "%rax", "%rdi", "%ecx", "%rbx"
+	);
+}
+
 struct fomtierfs_page *fomtierfs_alloc_page(struct inode *inode, struct fomtierfs_sb_info *sbi, u64 page_offset)
 {
     struct fomtierfs_page *page;
@@ -262,7 +303,10 @@ static void migrate_page(struct fomtierfs_sb_info *sbi, struct fomtierfs_inode_i
     // Copy the page
     to_addr = to_dev->virt_addr + (to_page->page_num << sbi->page_shift);
     from_addr = from_dev->virt_addr + (from_page->page_num << sbi->page_shift);
-    memcpy(to_addr, from_addr, sbi->page_size);
+    for (i = 0; i < sbi->page_size / PAGE_SIZE; i++) {
+        u64 off = i << PAGE_SHIFT;
+        fomtierfs_nt_copy(to_addr + off, from_addr + off);
+    }
 
     // Copy the metadata
     to_page->page_offset = from_page->page_offset;
