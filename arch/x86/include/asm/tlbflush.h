@@ -53,7 +53,6 @@ static inline void cr4_clear_bits(unsigned long mask)
 	local_irq_restore(flags);
 }
 
-#ifndef MODULE
 /*
  * 6 because 6 should be plenty and struct tlb_state will fit in two cache
  * lines.
@@ -356,8 +355,6 @@ static inline bool huge_pmd_needs_flush(pmd_t oldpmd, pmd_t newpmd)
 				    false);
 }
 #define huge_pmd_needs_flush huge_pmd_needs_flush
-
-#endif /* !MODULE */
 
 static inline void __native_tlb_flush_global(unsigned long cr4)
 {

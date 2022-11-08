@@ -257,7 +257,7 @@ static void migrate_page(struct fomtierfs_sb_info *sbi, struct fomtierfs_inode_i
             set_pte_at(vma->vm_mm, virt_addr, ptep, pte);
         }
     }
-    __flush_tlb_all();
+    flush_tlb_range(vma, virt_addr, virt_addr + sbi->page_size);
 
     // Copy the page
     to_addr = to_dev->virt_addr + (to_page->page_num << sbi->page_shift);
@@ -300,7 +300,7 @@ static void migrate_page(struct fomtierfs_sb_info *sbi, struct fomtierfs_inode_i
             set_pte_at(vma->vm_mm, virt_addr + (i << PAGE_SHIFT), ptep, pte);
         }
     }
-    __flush_tlb_all();
+    flush_tlb_range(vma, virt_addr, virt_addr + sbi->page_size);
 }
 
 static bool fomtierfs_page_accessed(struct fomtierfs_page *page, u64 virt_addr, pmd_t *pmdp)
