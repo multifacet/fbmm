@@ -861,6 +861,7 @@ STATIC_NOPV void native_flush_tlb_multi(const struct cpumask *cpumask,
 		on_each_cpu_mask(cond_cpumask, flush_tlb_func, (void *)info, true);
 	}
 }
+EXPORT_SYMBOL(flush_tlb_mm_range);
 
 void flush_tlb_multi(const struct cpumask *cpumask,
 		      const struct flush_tlb_info *info)
