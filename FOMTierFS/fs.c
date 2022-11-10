@@ -560,13 +560,13 @@ static void fomtierfs_promote_one(struct fomtierfs_sb_info *sbi, struct fomtierf
     last_accessed = page->last_accessed;
     page->last_accessed = accessed;
 
+    // Reset the accessed bit if we need to
+    if (accessed)
+        fomtierfs_page_mkold(vma, page, virt_addr, pmdp);
+
     // Only promote if the page has been accessed in both of the last
     // couple of checks.
     if (!accessed || !last_accessed) {
-        // The page was not accessed recently, so put it back and move
-        // on to the next one.
-        fomtierfs_page_accessed(page, virt_addr, pmdp);
-
         list_add(&page->list, &slow_dev->active_list);
         slow_dev->active_pages++;
 
