@@ -30,6 +30,9 @@ static const struct inode_operations fomtierfs_dir_inode_operations;
 
 // This is a copy of the sb_info struct. It should only be used in sysfs files
 static struct fomtierfs_sb_info *sysfs_sb_info = NULL;
+static u64 num_promotions = 0;
+static u64 num_demotions = 0;
+static ktime_t extra_fault_time = 0;
 
 struct fomtierfs_sb_info *FTFS_SB(struct super_block *sb)
 {
@@ -500,6 +503,8 @@ static void fomtierfs_demote_one(struct fomtierfs_sb_info *sbi, struct fomtierfs
 
     // Indicate that we need to find a new slow_page
     *slow_page = NULL;
+
+    num_demotions++;
 }
 
 static void fomtierfs_promote_one(struct fomtierfs_sb_info *sbi, struct fomtierfs_page **fast_page)
@@ -611,6 +616,8 @@ static void fomtierfs_promote_one(struct fomtierfs_sb_info *sbi, struct fomtierf
 
     // Indicate that we need to find a new fast_page
     *fast_page = NULL;
+
+    num_promotions++;
 }
 
 // Reader Beware: This function is a mess of locking and unlocking
@@ -718,6 +725,9 @@ static int fomtierfs_iomap_begin(struct inode *inode, loff_t offset, loff_t leng
     u64 page_offset;
     u64 page_shift;
     u64 base_page_offset;
+    ktime_t start_time;
+
+    start_time = ktime_get();
 
     // If we are in huge page mode, and there is a base page fault,
     // we will need to find which base page in the huge page we should map
@@ -766,6 +776,8 @@ static int fomtierfs_iomap_begin(struct inode *inode, loff_t offset, loff_t leng
         iomap->dax_dev = sbi->mem[page->type].daxdev;
 
         read_unlock(&inode_info->map_lock);
+
+        extra_fault_time += ktime_get() - start_time;
     }
     page->num_base_pages = max(page->num_base_pages, (u16)((base_page_offset >> PAGE_SHIFT) + 1));
 
@@ -1265,13 +1277,18 @@ static ssize_t usage_show(struct kobject *kobj,
         return sprintf(buf,
             "fast total: %lld\tfree: %lld\n"
             "slow total: %lld\tfree: %lld\n"
-            "Demotion Watermark: %llu Alloc Watermark: %llu\n",
+            "Demotion Watermark: %llu Alloc Watermark: %llu\n"
+            "Promotions: %llu Demotions: %llu\n"
+            "Extra fault time (ns): %llu\n",
             sysfs_sb_info->mem[FAST_MEM].num_pages,
             sysfs_sb_info->mem[FAST_MEM].free_pages,
             sysfs_sb_info->mem[SLOW_MEM].num_pages,
             sysfs_sb_info->mem[SLOW_MEM].free_pages,
             sysfs_sb_info->demotion_watermark,
-            sysfs_sb_info->alloc_watermark
+            sysfs_sb_info->alloc_watermark,
+            num_promotions,
+            num_demotions,
+            extra_fault_time
         );
     } else {
         return sprintf(buf, "Not mounted");
