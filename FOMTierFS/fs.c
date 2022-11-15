@@ -33,6 +33,7 @@ static struct fomtierfs_sb_info *sysfs_sb_info = NULL;
 static u64 num_promotions = 0;
 static u64 num_demotions = 0;
 static ktime_t extra_fault_time = 0;
+static u64 migrate_task_int = 5000;
 
 struct fomtierfs_sb_info *FTFS_SB(struct super_block *sb)
 {
@@ -711,7 +712,7 @@ static int fomtierfs_demote_task(void *data)
             fast_page = NULL;
         }
 
-        msleep_interruptible(5000);
+        msleep_interruptible(migrate_task_int);
     }
     return 0;
 }
@@ -1368,7 +1369,7 @@ static ssize_t demotion_watermark_store(struct kobject *kobj,
         return -EINVAL;
     }
 
-    ret =  kstrtoull(buf, 10, &sysfs_sb_info->demotion_watermark);
+    ret = kstrtoull(buf, 10, &sysfs_sb_info->demotion_watermark);
     if (ret)
         return ret;
 
@@ -1377,10 +1378,35 @@ static ssize_t demotion_watermark_store(struct kobject *kobj,
 static struct kobj_attribute demotion_watermark_attr =
 __ATTR(demotion_watermark, 0644, demotion_watermark_show, demotion_watermark_store);
 
+static ssize_t migrate_task_int_show(struct kobject *kobj,
+        struct kobj_attribute *attr, char *buf)
+{
+    return sprintf(buf, "%lld\n", migrate_task_int);
+}
+
+static ssize_t migrate_task_int_store(struct kobject *kobj,
+        struct kobj_attribute *attr,
+        const char *buf, size_t count)
+{
+    int ret;
+    u64 tmp;
+
+    ret = kstrtoull(buf, 10, &tmp);
+    if (ret)
+        return ret;
+
+    migrate_task_int = tmp;
+
+    return count;
+}
+static struct kobj_attribute migrate_task_int_attr =
+__ATTR(migrate_task_int, 0644, migrate_task_int_show, migrate_task_int_store);
+
 static struct attribute *fomtierfs_attr[] = {
     &usage_attr.attr,
     &active_list_attr.attr,
     &demotion_watermark_attr.attr,
+    &migrate_task_int_attr.attr,
     NULL,
 };
 
