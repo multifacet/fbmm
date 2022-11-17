@@ -291,18 +291,20 @@ static void migrate_page(struct fomtierfs_sb_info *sbi, struct fomtierfs_inode_i
         writeable = pmd_write(*pmdp);
         pmd = pmd_wrprotect(*pmdp);
         set_pmd_at(vma->vm_mm, virt_addr, pmdp, pmd);
+        flush_tlb_range(vma, virt_addr, virt_addr + HPAGE_SIZE);
     } else {
         for(i = 0; i < from_page->num_base_pages; i++) {
-            ptep = pte_offset_kernel(pmdp, virt_addr + (i << PAGE_SHIFT));
+            u64 cur_virt_addr = virt_addr + (i << PAGE_SHIFT);
+            ptep = pte_offset_kernel(pmdp, cur_virt_addr);
             if (!ptep || !pte_present(*ptep))
                 continue;
 
             writeable = writeable || pte_write(*ptep);
             pte = pte_wrprotect(*ptep);
-            set_pte_at(vma->vm_mm, virt_addr, ptep, pte);
+            set_pte_at(vma->vm_mm, cur_virt_addr, ptep, pte);
+            flush_tlb_page(vma, cur_virt_addr);
         }
     }
-    flush_tlb_range(vma, virt_addr, virt_addr + sbi->page_size);
 
     // Copy the page
     to_addr = to_dev->virt_addr + (to_page->page_num << sbi->page_shift);
@@ -334,10 +336,12 @@ static void migrate_page(struct fomtierfs_sb_info *sbi, struct fomtierfs_inode_i
         if (writeable)
             pmd = pmd_mkwrite(pmd);
         set_pmd_at(vma->vm_mm, virt_addr, pmdp, pmd);
+        flush_tlb_range(vma, virt_addr, virt_addr + sbi->page_size);
     } else {
         for (i = 0; i < to_page->num_base_pages; i++) {
+            u64 cur_virt_addr = virt_addr + (i << PAGE_SHIFT);
             new_pfn = to_dev->pfn.val + (to_page->page_num << (sbi->page_shift - PAGE_SHIFT)) + i;
-            ptep = pte_offset_kernel(pmdp, virt_addr + (i << PAGE_SHIFT));
+            ptep = pte_offset_kernel(pmdp, cur_virt_addr);
             if (!ptep || !pte_present(*ptep))
                 continue;
 
@@ -345,10 +349,10 @@ static void migrate_page(struct fomtierfs_sb_info *sbi, struct fomtierfs_inode_i
             pte = pte_mkold(pte);
             if (writeable)
                 pte = pte_mkwrite(pte);
-            set_pte_at(vma->vm_mm, virt_addr + (i << PAGE_SHIFT), ptep, pte);
+            set_pte_at(vma->vm_mm, cur_virt_addr, ptep, pte);
+            flush_tlb_page(vma, cur_virt_addr);
         }
     }
-    flush_tlb_range(vma, virt_addr, virt_addr + sbi->page_size);
 }
 
 static bool fomtierfs_page_accessed(struct fomtierfs_page *page, u64 virt_addr, pmd_t *pmdp)
