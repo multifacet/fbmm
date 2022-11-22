@@ -1110,6 +1110,7 @@ static int fomtierfs_populate_dev_info(struct fomtierfs_sb_info *sbi, struct blo
     // We want to work with pages of the size sbi->page_size, so calcualate
     // this ratio to convert between them.
     unsigned long page_size_ratio = sbi->page_size / PAGE_SIZE;
+    struct fomtierfs_page *pages;
 
     di->bdev = bdev;
     di->daxdev = fs_dax_get_by_bdev(bdev);
@@ -1129,9 +1130,16 @@ static int fomtierfs_populate_dev_info(struct fomtierfs_sb_info *sbi, struct blo
     INIT_LIST_HEAD(&di->free_list);
     INIT_LIST_HEAD(&di->active_list);
 
+    pages = vmalloc(sizeof(struct fomtierfs_page) * di->num_pages);
+    if (!pages) {
+        pr_err("Can't alloc pages!\n");
+        ret = -ENOMEM;
+        goto err;
+    }
+    memset(pages, 0, sizeof(struct fomtierfs_page) * di->num_pages);
     // Put all of the pages into the free list
     for (i = 0; i < di->num_pages; i++) {
-        struct fomtierfs_page *page = kzalloc(sizeof(struct fomtierfs_page), GFP_KERNEL);
+        struct fomtierfs_page *page = &pages[i];//kzalloc(sizeof(struct fomtierfs_page), GFP_KERNEL);
         if (!page) {
             ret = -ENOMEM;
             goto err;
