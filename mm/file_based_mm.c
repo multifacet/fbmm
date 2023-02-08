@@ -1,5 +1,5 @@
 #include <linux/types.h>
-#include <linux/file_only_mem.h>
+#include <linux/file_based_mm.h>
 #include <linux/sysfs.h>
 #include <linux/kobject.h>
 #include <linux/namei.h>
@@ -10,28 +10,28 @@
 #include <linux/falloc.h>
 #include <linux/timekeeping.h>
 
-enum file_only_mem_state {
-	FOM_OFF = 0,
-	FOM_SINGLE_PROC = 1,
-	FOM_ALL = 2
+enum file_based_mm_state {
+	FBMM_OFF = 0,
+	FBMM_SINGLE_PROC = 1,
+	FBMM_ALL = 2
 };
 
-struct fom_file {
+struct fbmm_file {
 	struct file *f;
 	unsigned long original_start; // Used to compute the offset for fallocate
 	int count;
 };
 
 // Start is inclusive, end is exclusive
-struct fom_mapping {
+struct fbmm_mapping {
 	u64 start;
 	u64 end;
-	struct fom_file *file;
+	struct fbmm_file *file;
 
 	struct rb_node node;
 };
 
-struct fom_proc {
+struct fbmm_proc {
 	pid_t pid;
 	struct rb_root mappings;
 
@@ -39,27 +39,27 @@ struct fom_proc {
 };
 
 
-static enum file_only_mem_state fom_state = FOM_OFF;
+static enum file_based_mm_state fbmm_state = FBMM_OFF;
 static pid_t cur_proc = 0;
 static char file_dir[PATH_MAX];
-static struct rb_root fom_procs = RB_ROOT;
-static DECLARE_RWSEM(fom_procs_sem);
+static struct rb_root fbmm_procs = RB_ROOT;
+static DECLARE_RWSEM(fbmm_procs_sem);
 
 static ktime_t file_create_time = 0;
 static u64 num_file_creates = 0;
 static ktime_t file_register_time = 0;
 static u64 num_file_registers = 0;
 
-static int fom_prealloc_map_populate = 1;
+static int fbmm_prealloc_map_populate = 1;
 
 ///////////////////////////////////////////////////////////////////////////////
-// struct fom_proc functions
+// struct fbmm_proc functions
 
-static struct fom_proc *get_fom_proc(pid_t pid) {
-	struct rb_node *node = fom_procs.rb_node;
+static struct fbmm_proc *get_fbmm_proc(pid_t pid) {
+	struct rb_node *node = fbmm_procs.rb_node;
 
 	while (node) {
-		struct fom_proc *proc = rb_entry(node, struct fom_proc, node);
+		struct fbmm_proc *proc = rb_entry(node, struct fbmm_proc, node);
 
 		if (pid < proc->pid)
 			node = node->rb_left;
@@ -72,12 +72,12 @@ static struct fom_proc *get_fom_proc(pid_t pid) {
 	return NULL;
 }
 
-static void insert_new_proc(struct fom_proc *new_proc) {
-	struct rb_node **new = &(fom_procs.rb_node);
+static void insert_new_proc(struct fbmm_proc *new_proc) {
+	struct rb_node **new = &(fbmm_procs.rb_node);
 	struct rb_node *parent = NULL;
 
 	while (*new) {
-		struct fom_proc *cur = rb_entry(*new, struct fom_proc, node);
+		struct fbmm_proc *cur = rb_entry(*new, struct fbmm_proc, node);
 
 		parent = *new;
 		if (new_proc->pid < cur->pid)
@@ -91,18 +91,18 @@ static void insert_new_proc(struct fom_proc *new_proc) {
 	}
 
 	rb_link_node(&new_proc->node, parent, new);
-	rb_insert_color(&new_proc->node, &fom_procs);
+	rb_insert_color(&new_proc->node, &fbmm_procs);
 }
 
 ///////////////////////////////////////////////////////////////////////////////
-// struct fom_mapping functions
+// struct fbmm_mapping functions
 
-static void insert_new_mapping(struct fom_proc *proc, struct fom_mapping *new_map) {
+static void insert_new_mapping(struct fbmm_proc *proc, struct fbmm_mapping *new_map) {
 	struct rb_node **new = &(proc->mappings.rb_node);
 	struct rb_node *parent = NULL;
 
 	while (*new) {
-		struct fom_mapping *cur = rb_entry(*new, struct fom_mapping, node);
+		struct fbmm_mapping *cur = rb_entry(*new, struct fbmm_mapping, node);
 
 		// Check for an overlap
 		if ((new_map->start >= cur->start && new_map->start < cur->end) ||
@@ -128,12 +128,12 @@ static void insert_new_mapping(struct fom_proc *proc, struct fom_mapping *new_ma
 
 // Returns the first mapping in proc where addr < mapping->end, NULL if none exists.
 // Mostly taken from find_vma
-static struct fom_mapping *find_mapping(struct fom_proc *proc, unsigned long addr) {
-	struct fom_mapping *mapping = NULL;
+static struct fbmm_mapping *find_mapping(struct fbmm_proc *proc, unsigned long addr) {
+	struct fbmm_mapping *mapping = NULL;
 	struct rb_node *node = proc->mappings.rb_node;
 
 	while (node) {
-		struct fom_mapping *tmp = rb_entry(node, struct fom_mapping, node);
+		struct fbmm_mapping *tmp = rb_entry(node, struct fbmm_mapping, node);
 
 		if (tmp->end > addr) {
 			mapping = tmp;
@@ -152,7 +152,7 @@ static struct fom_mapping *find_mapping(struct fom_proc *proc, unsigned long add
 // Helper functions
 
 // Most of this is taken from do_sys_truncate in fs/open.c
-static int truncate_fom_file(struct file *f, unsigned long len, int flags) {
+static int truncate_fbmm_file(struct file *f, unsigned long len, int flags) {
 	struct inode *inode;
 	struct dentry *dentry;
 	int error;
@@ -160,7 +160,7 @@ static int truncate_fom_file(struct file *f, unsigned long len, int flags) {
 	dentry = f->f_path.dentry;
 	inode = dentry->d_inode;
 
-	if ((flags & MAP_POPULATE) && fom_prealloc_map_populate) {
+	if ((flags & MAP_POPULATE) && fbmm_prealloc_map_populate) {
 		error = vfs_truncate(&f->f_path, len);
 		if (!error)
 			error = vfs_fallocate(f, 0, 0, len);
@@ -178,7 +178,7 @@ static int truncate_fom_file(struct file *f, unsigned long len, int flags) {
 	return error;
 }
 
-static void drop_fom_file(struct fom_mapping *map) {
+static void drop_fbmm_file(struct fbmm_mapping *map) {
 	map->file->count--;
 	if (map->file->count <= 0) {
 		filp_close(map->file->f, current->files);
@@ -191,12 +191,12 @@ static void drop_fom_file(struct fom_mapping *map) {
 ///////////////////////////////////////////////////////////////////////////////
 // External API functions
 
-bool use_file_only_mem(pid_t pid) {
-	if (fom_state == FOM_OFF) {
+bool use_file_based_mm(pid_t pid) {
+	if (fbmm_state == FBMM_OFF) {
 		return false;
-	} if (fom_state == FOM_SINGLE_PROC) {
+	} if (fbmm_state == FBMM_SINGLE_PROC) {
 		return pid == cur_proc;
-	} else if (fom_state == FOM_ALL) {
+	} else if (fbmm_state == FBMM_ALL) {
 		return true;
 	}
 
@@ -204,7 +204,7 @@ bool use_file_only_mem(pid_t pid) {
 	return false;
 }
 
-struct file *fom_create_new_file(unsigned long len, unsigned long prot, int flags) {
+struct file *fbmm_create_new_file(unsigned long len, unsigned long prot, int flags) {
 	struct file *f;
 	int open_flags = O_EXCL | O_TMPFILE;
 	umode_t open_mode = 0;
@@ -231,7 +231,7 @@ struct file *fom_create_new_file(unsigned long len, unsigned long prot, int flag
 		return NULL;
 
 	// Set the file to the correct size
-	ret = truncate_fom_file(f, len, flags);
+	ret = truncate_fbmm_file(f, len, flags);
 	if (ret) {
 		filp_close(f, current->files);
 		return NULL;
@@ -243,25 +243,25 @@ struct file *fom_create_new_file(unsigned long len, unsigned long prot, int flag
 	return f;
 }
 
-void fom_register_file(pid_t pid, struct file *f,
+void fbmm_register_file(pid_t pid, struct file *f,
 		unsigned long start, unsigned long len)
 {
-	struct fom_proc *proc;
-	struct fom_mapping *mapping = NULL;
-	struct fom_file *file = NULL;
+	struct fbmm_proc *proc;
+	struct fbmm_mapping *mapping = NULL;
+	struct fbmm_file *file = NULL;
 	bool new_proc = false;
 	ktime_t start_time = ktime_get_ns();
 
-	down_read(&fom_procs_sem);
-	proc = get_fom_proc(pid);
-	up_read(&fom_procs_sem);
+	down_read(&fbmm_procs_sem);
+	proc = get_fbmm_proc(pid);
+	up_read(&fbmm_procs_sem);
 	// Create the proc data structure if it does not already exist
 	if (!proc) {
 		new_proc = true;
 
-		proc = vmalloc(sizeof(struct fom_proc));
+		proc = vmalloc(sizeof(struct fbmm_proc));
 		if (!proc) {
-			pr_err("fom_create_new_file: not enough memory for proc\n");
+			pr_err("fbmm_create_new_file: not enough memory for proc\n");
 			return;
 		}
 
@@ -269,7 +269,7 @@ void fom_register_file(pid_t pid, struct file *f,
 		proc->mappings = RB_ROOT;
 	}
 
-	file = vmalloc(sizeof(struct fom_file));
+	file = vmalloc(sizeof(struct fbmm_file));
 	if (!file)
 		goto err;
 
@@ -280,23 +280,23 @@ void fom_register_file(pid_t pid, struct file *f,
 	file->original_start = start;
 
 	// Create the new mapping
-	mapping = vmalloc(sizeof(struct fom_mapping));
+	mapping = vmalloc(sizeof(struct fbmm_mapping));
 	if (!mapping) {
-		pr_err("fom_create_new_file: not enough memory for mapping\n");
+		pr_err("fbmm_create_new_file: not enough memory for mapping\n");
 		goto err;
 	}
 	mapping->start = start;
 	mapping->end = start + len;
 	mapping->file = file;
 
-	down_write(&fom_procs_sem);
+	down_write(&fbmm_procs_sem);
 
 	insert_new_mapping(proc, mapping);
 
-	// If we created a new fom_proc, add it to the rb_tree
+	// If we created a new fbmm_proc, add it to the rb_tree
 	if (new_proc)
 		insert_new_proc(proc);
-	up_write(&fom_procs_sem);
+	up_write(&fbmm_procs_sem);
 
 	file_register_time += ktime_get_ns() - start_time;
 	num_file_registers++;
@@ -309,18 +309,18 @@ err:
 		vfree(file);
 }
 
-int fom_munmap(pid_t pid, unsigned long start, unsigned long len) {
-	struct fom_proc *proc = NULL;
-	struct fom_mapping *old_mapping = NULL;
+int fbmm_munmap(pid_t pid, unsigned long start, unsigned long len) {
+	struct fbmm_proc *proc = NULL;
+	struct fbmm_mapping *old_mapping = NULL;
 	unsigned long end = start + len;
 	unsigned long falloc_offset, falloc_len;
 	struct file *falloc_file = NULL;
 	bool do_falloc = false;
 	int ret = 0;
 
-	down_read(&fom_procs_sem);
-	proc = get_fom_proc(pid);
-	up_read(&fom_procs_sem);
+	down_read(&fbmm_procs_sem);
+	proc = get_fbmm_proc(pid);
+	up_read(&fbmm_procs_sem);
 
 	if (!proc)
 		return 0;
@@ -332,21 +332,21 @@ int fom_munmap(pid_t pid, unsigned long start, unsigned long len) {
 
 		// Finds the first mapping where start < mapping->end, so we have to
 		// check if old_mapping is actually within the range
-		down_read(&fom_procs_sem);
+		down_read(&fbmm_procs_sem);
 		old_mapping = find_mapping(proc, start);
 		if (!old_mapping || end <= old_mapping->start)
 			goto exit_locked;
 
 		next_start = old_mapping->end;
-		up_read(&fom_procs_sem);
+		up_read(&fbmm_procs_sem);
 
 		// If the unmap range entirely contains the mapping, we can simply delete it
 		if (start <= old_mapping->start && old_mapping->end <= end) {
 			// First, we have to grab a write lock
-			down_write(&fom_procs_sem);
+			down_write(&fbmm_procs_sem);
 
 			rb_erase(&old_mapping->node, &proc->mappings);
-			drop_fom_file(old_mapping);
+			drop_fbmm_file(old_mapping);
 
 			// If old_mapping->file is null, it has been deleted.
 			// Otherwise, we should punch a hole in this mapping
@@ -360,11 +360,11 @@ int fom_munmap(pid_t pid, unsigned long start, unsigned long len) {
 
 			vfree(old_mapping);
 
-			up_write(&fom_procs_sem);
+			up_write(&fbmm_procs_sem);
 		}
 		// If the unmap range takes only the end of the mapping, truncate the file
 		else if (start < old_mapping->end && old_mapping->end <= end) {
-			down_write(&fom_procs_sem);
+			down_write(&fbmm_procs_sem);
 
 			falloc_offset = start - old_mapping->file->original_start;
 			falloc_len = old_mapping->end - start;
@@ -372,12 +372,12 @@ int fom_munmap(pid_t pid, unsigned long start, unsigned long len) {
 			falloc_file = old_mapping->file->f;
 			do_falloc = true;
 
-			up_write(&fom_procs_sem);
+			up_write(&fbmm_procs_sem);
 		}
 		// If the unmap range trims off only the beginning of the mapping,
 		// deallocate the beginning
 		else if (start <= old_mapping->start && old_mapping->start < end) {
-			down_write(&fom_procs_sem);
+			down_write(&fbmm_procs_sem);
 
 			falloc_offset = old_mapping->start - old_mapping->file->original_start;
 			falloc_len = end - old_mapping->start;
@@ -385,23 +385,23 @@ int fom_munmap(pid_t pid, unsigned long start, unsigned long len) {
 			falloc_file = old_mapping->file->f;
 			do_falloc = true;
 
-			up_write(&fom_procs_sem);
+			up_write(&fbmm_procs_sem);
 		}
 		// If the unmap range is entirely within a mapping, poke a hole
 		// in the middle of the file and create a new mapping to represent
 		// the split
 		else if (old_mapping->start < start && end < old_mapping->end) {
-			struct fom_mapping *new_mapping = vmalloc(sizeof(struct fom_mapping));
+			struct fbmm_mapping *new_mapping = vmalloc(sizeof(struct fbmm_mapping));
 
 			if (!new_mapping) {
-				pr_err("fom_munmap: can't allocate new fom_mapping\n");
+				pr_err("fbmm_munmap: can't allocate new fbmm_mapping\n");
 				return -ENOMEM;
 			}
 
 			new_mapping->start = end;
 			new_mapping->end = old_mapping->end;
 
-			down_write(&fom_procs_sem);
+			down_write(&fbmm_procs_sem);
 			old_mapping->end = start;
 
 			new_mapping->file = old_mapping->file;
@@ -413,7 +413,7 @@ int fom_munmap(pid_t pid, unsigned long start, unsigned long len) {
 			falloc_len = end - start;
 			falloc_file = old_mapping->file->f;
 			do_falloc = true;
-			up_write(&fom_procs_sem);
+			up_write(&fbmm_procs_sem);
 		}
 
 		if (do_falloc) {
@@ -427,31 +427,31 @@ int fom_munmap(pid_t pid, unsigned long start, unsigned long len) {
 
 	return ret;
 exit_locked:
-	up_read(&fom_procs_sem);
+	up_read(&fbmm_procs_sem);
 	return ret;
 }
 
-void fom_check_exiting_proc(pid_t pid) {
-	struct fom_proc *proc;
+void fbmm_check_exiting_proc(pid_t pid) {
+	struct fbmm_proc *proc;
 	struct rb_node *node;
 
-	down_read(&fom_procs_sem);
-	proc = get_fom_proc(pid);
-	up_read(&fom_procs_sem);
+	down_read(&fbmm_procs_sem);
+	proc = get_fbmm_proc(pid);
+	up_read(&fbmm_procs_sem);
 
 	if (!proc)
 		return;
 
-	down_write(&fom_procs_sem);
+	down_write(&fbmm_procs_sem);
 
 	// First, free the mappings tree
 	node = proc->mappings.rb_node;
 	while (node) {
-		struct fom_mapping *map = rb_entry(node, struct fom_mapping, node);
+		struct fbmm_mapping *map = rb_entry(node, struct fbmm_mapping, node);
 		rb_erase(node, &proc->mappings);
 		node = proc->mappings.rb_node;
 
-		drop_fom_file(map);
+		drop_fbmm_file(map);
 
 		vfree(map);
 	}
@@ -459,21 +459,21 @@ void fom_check_exiting_proc(pid_t pid) {
 	// Now, remove the proc from the procs tree and free it
 	// TODO: I might be able to remove the proc from the proc tree first,
 	// then free everything else without holding any locks...
-	rb_erase(&proc->node, &fom_procs);
+	rb_erase(&proc->node, &fbmm_procs);
 	vfree(proc);
 
-	up_write(&fom_procs_sem);
+	up_write(&fbmm_procs_sem);
 }
 
 ///////////////////////////////////////////////////////////////////////////////
 // sysfs files
-static ssize_t fom_state_show(struct kobject *kobj,
+static ssize_t fbmm_state_show(struct kobject *kobj,
 		struct kobj_attribute *attr, char *buf)
 {
-	return sprintf(buf, "%d\n", fom_state);
+	return sprintf(buf, "%d\n", fbmm_state);
 }
 
-static ssize_t fom_state_store(struct kobject *kobj,
+static ssize_t fbmm_state_store(struct kobject *kobj,
 		struct kobj_attribute *attr,
 		const char *buf, size_t count)
 {
@@ -483,26 +483,26 @@ static ssize_t fom_state_store(struct kobject *kobj,
 	ret = kstrtoint(buf, 0, &state);
 
 	if (ret != 0) {
-		fom_state = FOM_OFF;
+		fbmm_state = FBMM_OFF;
 		return ret;
-	} else if (state >= FOM_OFF && state <= FOM_ALL) {
-		fom_state = state;
+	} else if (state >= FBMM_OFF && state <= FBMM_ALL) {
+		fbmm_state = state;
 		return count;
 	} else {
-		fom_state = FOM_OFF;
+		fbmm_state = FBMM_OFF;
 		return -EINVAL;
 	}
 }
-static struct kobj_attribute fom_state_attribute =
-__ATTR(state, 0644, fom_state_show, fom_state_store);
+static struct kobj_attribute fbmm_state_attribute =
+__ATTR(state, 0644, fbmm_state_show, fbmm_state_store);
 
-static ssize_t fom_pid_show(struct kobject *kobj,
+static ssize_t fbmm_pid_show(struct kobject *kobj,
 		struct kobj_attribute *attr, char *buf)
 {
 	return sprintf(buf, "%d\n", cur_proc);
 }
 
-static ssize_t fom_pid_store(struct kobject *kobj,
+static ssize_t fbmm_pid_store(struct kobject *kobj,
 		struct kobj_attribute *attr,
 		const char *buf, size_t count)
 {
@@ -520,16 +520,16 @@ static ssize_t fom_pid_store(struct kobject *kobj,
 
 	return count;
 }
-static struct kobj_attribute fom_pid_attribute =
-__ATTR(pid, 0644, fom_pid_show, fom_pid_store);
+static struct kobj_attribute fbmm_pid_attribute =
+__ATTR(pid, 0644, fbmm_pid_show, fbmm_pid_store);
 
-static ssize_t fom_dir_show(struct kobject *kobj,
+static ssize_t fbmm_dir_show(struct kobject *kobj,
 		struct kobj_attribute *attr, char *buf)
 {
 	return sprintf(buf, "%s\n", file_dir);
 }
 
-static ssize_t fom_dir_store(struct kobject *kobj,
+static ssize_t fbmm_dir_store(struct kobject *kobj,
 		struct kobj_attribute *attr,
 		const char *buf, size_t count)
 {
@@ -558,10 +558,10 @@ static ssize_t fom_dir_store(struct kobject *kobj,
 
 	return count;
 }
-static struct kobj_attribute fom_file_dir_attribute =
-__ATTR(file_dir, 0644, fom_dir_show, fom_dir_store);
+static struct kobj_attribute fbmm_file_dir_attribute =
+__ATTR(file_dir, 0644, fbmm_dir_show, fbmm_dir_store);
 
-static ssize_t fom_stats_show(struct kobject *kobj,
+static ssize_t fbmm_stats_show(struct kobject *kobj,
 		struct kobj_attribute *attr, char *buf)
 {
     u64 avg_create_time = 0;
@@ -583,7 +583,7 @@ static ssize_t fom_stats_show(struct kobject *kobj,
     return count;
 }
 
-static ssize_t fom_stats_store(struct kobject *kobj,
+static ssize_t fbmm_stats_store(struct kobject *kobj,
 		struct kobj_attribute *attr,
 		const char *buf, size_t count)
 {
@@ -593,17 +593,17 @@ static ssize_t fom_stats_store(struct kobject *kobj,
 	num_file_registers = 0;
 	return count;
 }
-static struct kobj_attribute fom_stats_attribute =
-__ATTR(stats, 0644, fom_stats_show, fom_stats_store);
+static struct kobj_attribute fbmm_stats_attribute =
+__ATTR(stats, 0644, fbmm_stats_show, fbmm_stats_store);
 
-int fom_dax_pte_fault_size = 1;
-static ssize_t fom_dax_pte_fault_size_show(struct kobject *kobj,
+int fbmm_dax_pte_fault_size = 1;
+static ssize_t fbmm_dax_pte_fault_size_show(struct kobject *kobj,
 		struct kobj_attribute *attr, char *buf)
 {
-	return sprintf(buf, "%d\n", fom_dax_pte_fault_size);
+	return sprintf(buf, "%d\n", fbmm_dax_pte_fault_size);
 }
 
-static ssize_t fom_dax_pte_fault_size_store(struct kobject *kobj,
+static ssize_t fbmm_dax_pte_fault_size_store(struct kobject *kobj,
 		struct kobj_attribute *attr,
 		const char *buf, size_t count)
 {
@@ -613,19 +613,19 @@ static ssize_t fom_dax_pte_fault_size_store(struct kobject *kobj,
 	ret = kstrtoint(buf, 0, &fault_size);
 
 	if (ret != 0) {
-		fom_dax_pte_fault_size = 1;
+		fbmm_dax_pte_fault_size = 1;
 		return ret;
 	}
 
 	if (fault_size > 0)
-		fom_dax_pte_fault_size = fault_size;
+		fbmm_dax_pte_fault_size = fault_size;
 	else
-		fom_dax_pte_fault_size = 1;
+		fbmm_dax_pte_fault_size = 1;
 
 	return count;
 }
-static struct kobj_attribute fom_dax_pte_fault_size_attribute =
-__ATTR(pte_fault_size, 0644, fom_dax_pte_fault_size_show, fom_dax_pte_fault_size_store);
+static struct kobj_attribute fbmm_dax_pte_fault_size_attribute =
+__ATTR(pte_fault_size, 0644, fbmm_dax_pte_fault_size_show, fbmm_dax_pte_fault_size_store);
 
 int nt_huge_page_zero = 1;
 static ssize_t nt_huge_page_zero_show(struct kobject *kobj,
@@ -658,14 +658,14 @@ static ssize_t nt_huge_page_zero_store(struct kobject *kobj,
 static struct kobj_attribute nt_huge_page_zero_attribute =
 __ATTR(nt_huge_page_zero, 0644, nt_huge_page_zero_show, nt_huge_page_zero_store);
 
-int fom_follow_page_mask_fix = 1;
-static ssize_t fom_follow_page_mask_fix_show(struct kobject *kobj,
+int fbmm_follow_page_mask_fix = 1;
+static ssize_t fbmm_follow_page_mask_fix_show(struct kobject *kobj,
 		struct kobj_attribute *attr, char *buf)
 {
-	return sprintf(buf, "%d\n", fom_follow_page_mask_fix);
+	return sprintf(buf, "%d\n", fbmm_follow_page_mask_fix);
 }
 
-static ssize_t fom_follow_page_mask_fix_store(struct kobject *kobj,
+static ssize_t fbmm_follow_page_mask_fix_store(struct kobject *kobj,
 		struct kobj_attribute *attr,
 		const char *buf, size_t count)
 {
@@ -675,28 +675,28 @@ static ssize_t fom_follow_page_mask_fix_store(struct kobject *kobj,
 	ret = kstrtoint(buf, 0, &val);
 
 	if (ret != 0) {
-		fom_follow_page_mask_fix = 1;
+		fbmm_follow_page_mask_fix = 1;
 		return ret;
 	}
 
 	if (val == 0)
-		fom_follow_page_mask_fix = 0;
+		fbmm_follow_page_mask_fix = 0;
 	else
-		fom_follow_page_mask_fix = 1;
+		fbmm_follow_page_mask_fix = 1;
 
 	return count;
 }
-static struct kobj_attribute fom_follow_page_mask_fix_attribute =
-__ATTR(follow_page_mask_fix, 0644, fom_follow_page_mask_fix_show, fom_follow_page_mask_fix_store);
+static struct kobj_attribute fbmm_follow_page_mask_fix_attribute =
+__ATTR(follow_page_mask_fix, 0644, fbmm_follow_page_mask_fix_show, fbmm_follow_page_mask_fix_store);
 
-int fom_pmem_write_zeroes = 1;
-static ssize_t fom_pmem_write_zeroes_show(struct kobject *kobj,
+int fbmm_pmem_write_zeroes = 1;
+static ssize_t fbmm_pmem_write_zeroes_show(struct kobject *kobj,
 		struct kobj_attribute *attr, char *buf)
 {
-	return sprintf(buf, "%d\n", fom_pmem_write_zeroes);
+	return sprintf(buf, "%d\n", fbmm_pmem_write_zeroes);
 }
 
-static ssize_t fom_pmem_write_zeroes_store(struct kobject *kobj,
+static ssize_t fbmm_pmem_write_zeroes_store(struct kobject *kobj,
 		struct kobj_attribute *attr,
 		const char *buf, size_t count)
 {
@@ -706,28 +706,28 @@ static ssize_t fom_pmem_write_zeroes_store(struct kobject *kobj,
 	ret = kstrtoint(buf, 0, &val);
 
 	if (ret != 0) {
-		fom_pmem_write_zeroes = 1;
+		fbmm_pmem_write_zeroes = 1;
 		return ret;
 	}
 
 	if (val == 0)
-		fom_pmem_write_zeroes = 0;
+		fbmm_pmem_write_zeroes = 0;
 	else
-		fom_pmem_write_zeroes = 1;
+		fbmm_pmem_write_zeroes = 1;
 
 	return count;
 }
-static struct kobj_attribute fom_pmem_write_zeroes_attribute =
-__ATTR(pmem_write_zeroes, 0644, fom_pmem_write_zeroes_show, fom_pmem_write_zeroes_store);
+static struct kobj_attribute fbmm_pmem_write_zeroes_attribute =
+__ATTR(pmem_write_zeroes, 0644, fbmm_pmem_write_zeroes_show, fbmm_pmem_write_zeroes_store);
 
-int fom_track_pfn_insert = 0;
-static ssize_t fom_track_pfn_insert_show(struct kobject *kobj,
+int fbmm_track_pfn_insert = 0;
+static ssize_t fbmm_track_pfn_insert_show(struct kobject *kobj,
 		struct kobj_attribute *attr, char *buf)
 {
-	return sprintf(buf, "%d\n", fom_track_pfn_insert);
+	return sprintf(buf, "%d\n", fbmm_track_pfn_insert);
 }
 
-static ssize_t fom_track_pfn_insert_store(struct kobject *kobj,
+static ssize_t fbmm_track_pfn_insert_store(struct kobject *kobj,
 		struct kobj_attribute *attr,
 		const char *buf, size_t count)
 {
@@ -737,28 +737,28 @@ static ssize_t fom_track_pfn_insert_store(struct kobject *kobj,
 	ret = kstrtoint(buf, 0, &val);
 
 	if (ret != 0) {
-		fom_track_pfn_insert = 0;
+		fbmm_track_pfn_insert = 0;
 		return ret;
 	}
 
 	if (val == 0)
-		fom_track_pfn_insert = 0;
+		fbmm_track_pfn_insert = 0;
 	else
-		fom_track_pfn_insert = 1;
+		fbmm_track_pfn_insert = 1;
 
 	return count;
 }
-static struct kobj_attribute fom_track_pfn_insert_attribute =
-__ATTR(track_pfn_insert, 0644, fom_track_pfn_insert_show, fom_track_pfn_insert_store);
+static struct kobj_attribute fbmm_track_pfn_insert_attribute =
+__ATTR(track_pfn_insert, 0644, fbmm_track_pfn_insert_show, fbmm_track_pfn_insert_store);
 
-int fom_mark_inode_dirty = 0;
-static ssize_t fom_mark_inode_dirty_show(struct kobject *kobj,
+int fbmm_mark_inode_dirty = 0;
+static ssize_t fbmm_mark_inode_dirty_show(struct kobject *kobj,
 		struct kobj_attribute *attr, char *buf)
 {
-	return sprintf(buf, "%d\n", fom_mark_inode_dirty);
+	return sprintf(buf, "%d\n", fbmm_mark_inode_dirty);
 }
 
-static ssize_t fom_mark_inode_dirty_store(struct kobject *kobj,
+static ssize_t fbmm_mark_inode_dirty_store(struct kobject *kobj,
 		struct kobj_attribute *attr,
 		const char *buf, size_t count)
 {
@@ -768,27 +768,27 @@ static ssize_t fom_mark_inode_dirty_store(struct kobject *kobj,
 	ret = kstrtoint(buf, 0, &val);
 
 	if (ret != 0) {
-		fom_mark_inode_dirty = 0;
+		fbmm_mark_inode_dirty = 0;
 		return ret;
 	}
 
 	if (val == 0)
-		fom_mark_inode_dirty = 0;
+		fbmm_mark_inode_dirty = 0;
 	else
-		fom_mark_inode_dirty = 1;
+		fbmm_mark_inode_dirty = 1;
 
 	return count;
 }
-static struct kobj_attribute fom_mark_inode_dirty_attribute =
-__ATTR(mark_inode_dirty, 0644, fom_mark_inode_dirty_show, fom_mark_inode_dirty_store);
+static struct kobj_attribute fbmm_mark_inode_dirty_attribute =
+__ATTR(mark_inode_dirty, 0644, fbmm_mark_inode_dirty_show, fbmm_mark_inode_dirty_store);
 
-static ssize_t fom_prealloc_map_populate_show(struct kobject *kobj,
+static ssize_t fbmm_prealloc_map_populate_show(struct kobject *kobj,
 		struct kobj_attribute *attr, char *buf)
 {
-	return sprintf(buf, "%d\n", fom_prealloc_map_populate);
+	return sprintf(buf, "%d\n", fbmm_prealloc_map_populate);
 }
 
-static ssize_t fom_prealloc_map_populate_store(struct kobject *kobj,
+static ssize_t fbmm_prealloc_map_populate_store(struct kobject *kobj,
 		struct kobj_attribute *attr,
 		const char *buf, size_t count)
 {
@@ -798,61 +798,61 @@ static ssize_t fom_prealloc_map_populate_store(struct kobject *kobj,
 	ret = kstrtoint(buf, 0, &val);
 
 	if (ret != 0) {
-		fom_prealloc_map_populate = 1;
+		fbmm_prealloc_map_populate = 1;
 		return ret;
 	}
 
 	if (val == 0)
-		fom_prealloc_map_populate = 0;
+		fbmm_prealloc_map_populate = 0;
 	else
-		fom_prealloc_map_populate = 1;
+		fbmm_prealloc_map_populate = 1;
 
 	return count;
 }
-static struct kobj_attribute fom_prealloc_map_populate_attribute =
-__ATTR(prealloc_map_populate, 0644, fom_prealloc_map_populate_show, fom_prealloc_map_populate_store);
+static struct kobj_attribute fbmm_prealloc_map_populate_attribute =
+__ATTR(prealloc_map_populate, 0644, fbmm_prealloc_map_populate_show, fbmm_prealloc_map_populate_store);
 
-static struct attribute *file_only_mem_attr[] = {
-	&fom_state_attribute.attr,
-	&fom_pid_attribute.attr,
-	&fom_file_dir_attribute.attr,
-	&fom_stats_attribute.attr,
-	&fom_dax_pte_fault_size_attribute.attr,
+static struct attribute *file_based_mm_attr[] = {
+	&fbmm_state_attribute.attr,
+	&fbmm_pid_attribute.attr,
+	&fbmm_file_dir_attribute.attr,
+	&fbmm_stats_attribute.attr,
+	&fbmm_dax_pte_fault_size_attribute.attr,
 	&nt_huge_page_zero_attribute.attr,
-	&fom_follow_page_mask_fix_attribute.attr,
-	&fom_pmem_write_zeroes_attribute.attr,
-	&fom_track_pfn_insert_attribute.attr,
-	&fom_mark_inode_dirty_attribute.attr,
-	&fom_prealloc_map_populate_attribute.attr,
+	&fbmm_follow_page_mask_fix_attribute.attr,
+	&fbmm_pmem_write_zeroes_attribute.attr,
+	&fbmm_track_pfn_insert_attribute.attr,
+	&fbmm_mark_inode_dirty_attribute.attr,
+	&fbmm_prealloc_map_populate_attribute.attr,
 	NULL,
 };
 
-static const struct attribute_group file_only_mem_attr_group = {
-	.attrs = file_only_mem_attr,
+static const struct attribute_group file_based_mm_attr_group = {
+	.attrs = file_based_mm_attr,
 };
 
 ///////////////////////////////////////////////////////////////////////////////
 // Init
-static int __init file_only_memory_init(void)
+static int __init file_based_mm_init(void)
 {
-	struct kobject *fom_kobj;
+	struct kobject *fbmm_kobj;
 	int err;
 
 	memset(file_dir, 0, PATH_MAX);
 
-	fom_kobj = kobject_create_and_add("fom", mm_kobj);
-	if (unlikely(!fom_kobj)) {
-		pr_err("failed to create the file only memory kobject\n");
+	fbmm_kobj = kobject_create_and_add("fbmm", mm_kobj);
+	if (unlikely(!fbmm_kobj)) {
+		pr_err("failed to create the file based mm kobject\n");
 		return -ENOMEM;
 	}
 
-	err = sysfs_create_group(fom_kobj, &file_only_mem_attr_group);
+	err = sysfs_create_group(fbmm_kobj, &file_based_mm_attr_group);
 	if (err) {
-		pr_err("failed to register the file only memory group\n");
-		kobject_put(fom_kobj);
+		pr_err("failed to register the file based mm group\n");
+		kobject_put(fbmm_kobj);
 		return err;
 	}
 
 	return 0;
 }
-subsys_initcall(file_only_memory_init);
+subsys_initcall(file_based_mm_init);

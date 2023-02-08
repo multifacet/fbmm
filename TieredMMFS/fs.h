@@ -8,20 +8,20 @@
 #include <linux/sched.h>
 
 /**
- * FOMTierFS Lock Priority (from highest priority to lowest):
- *  1) fomtierfs_dev_info.lock
- *  2) fomtierfs_page.lock
+ * TieredMMFS Lock Priority (from highest priority to lowest):
+ *  1) tieredmmfs_dev_info.lock
+ *  2) tieredmmfs_page.lock
  *      2a) Pages from the fast device
  *      2b) Pages from the slow device
- *  3) fomtierfs_inode_info.map_lock
+ *  3) tieredmmfs_inode_info.map_lock
  */
 
-enum fomtierfs_mem_type {
+enum tieredmmfs_mem_type {
     FAST_MEM = 0,
     SLOW_MEM = 1,
 };
 
-struct fomtierfs_page {
+struct tieredmmfs_page {
     u64 page_num; // The physical page number within the device
     u64 page_offset; // The page offset within the file
     // If we are using huge pages, but an allocation only uses base pages,
@@ -29,15 +29,15 @@ struct fomtierfs_page {
     u16 num_base_pages;
     struct inode *inode; // If the file is allocated, the inode it belongs to. Else null.
     bool last_accessed; // Whether the accessed bit was set last time it was checked
-    enum fomtierfs_mem_type type; // Whether this page is in fast or slow mem
+    enum tieredmmfs_mem_type type; // Whether this page is in fast or slow mem
     spinlock_t lock; // Lock that protects the fields of this struct above it.
-    // Linked List to connect pages in the free/active list. Protected by fomtierfs_dev_info.lock
+    // Linked List to connect pages in the free/active list. Protected by tieredmmfs_dev_info.lock
     struct list_head list;
-    // RB Tree keyed by page_offset used by inodes to keep track of their pages. Protected by fomtierfs_inode_info.map_lock
+    // RB Tree keyed by page_offset used by inodes to keep track of their pages. Protected by tieredmmfs_inode_info.map_lock
     struct rb_node node;
 };
 
-struct fomtierfs_dev_info {
+struct tieredmmfs_dev_info {
     struct block_device *bdev;
     struct dax_device *daxdev;
     void* virt_addr; // Kernel's virtual address to dax device
@@ -50,8 +50,8 @@ struct fomtierfs_dev_info {
     spinlock_t lock;
 };
 
-struct fomtierfs_sb_info {
-    struct fomtierfs_dev_info mem[2];
+struct tieredmmfs_sb_info {
+    struct tieredmmfs_dev_info mem[2];
     struct task_struct *demote_task;
     // Start demotion if fast_mem has less than demotion_watermark% of memory free
     u64 demotion_watermark;
@@ -62,21 +62,21 @@ struct fomtierfs_sb_info {
     unsigned char page_shift;
 };
 
-struct fomtierfs_inode_info {
+struct tieredmmfs_inode_info {
     struct rb_root page_maps; // Mapping of offset page to dax page
     rwlock_t map_lock;
 };
 
-struct fomtierfs_context_info {
+struct tieredmmfs_context_info {
     char *slow_dev_name;
     bool base_pages;
 };
 
-struct fomtierfs_sb_info *FTFS_SB(struct super_block *sb);
+struct tieredmmfs_sb_info *FTFS_SB(struct super_block *sb);
 
-struct fomtierfs_inode_info *FTFS_I(struct inode *inode);
+struct tieredmmfs_inode_info *FTFS_I(struct inode *inode);
 
-struct fomtierfs_page *fomtierfs_find_page(struct rb_root *root, u64 offset);
-bool fomtierfs_insert_page(struct rb_root *root, struct fomtierfs_page *page);
-void fomtierfs_replace_page(struct rb_root *root, struct fomtierfs_page *new_page);
+struct tieredmmfs_page *tieredmmfs_find_page(struct rb_root *root, u64 offset);
+bool tieredmmfs_insert_page(struct rb_root *root, struct tieredmmfs_page *page);
+void tieredmmfs_replace_page(struct rb_root *root, struct tieredmmfs_page *new_page);
 #endif // FOMTIERFS_FS_H

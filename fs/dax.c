@@ -1665,7 +1665,7 @@ static vm_fault_t dax_fault_iter(struct vm_fault *vmf,
 	return vmf_insert_mixed(vmf->vma, vmf->address, pfn);
 }
 
-extern int fom_dax_pte_fault_size;
+extern int fbmm_dax_pte_fault_size;
 static vm_fault_t dax_iomap_pte_fault(struct vm_fault *vmf, pfn_t *pfnp,
 			       int *iomap_errp, const struct iomap_ops *ops)
 {
@@ -1674,7 +1674,7 @@ static vm_fault_t dax_iomap_pte_fault(struct vm_fault *vmf, pfn_t *pfnp,
 	struct iomap_iter iter = {
 		.inode		= mapping->host,
 		.pos		= (loff_t)vmf->pgoff << PAGE_SHIFT,
-		.len		= fom_dax_pte_fault_size * PAGE_SIZE,
+		.len		= fbmm_dax_pte_fault_size * PAGE_SIZE,
 		.flags		= IOMAP_DAX | IOMAP_FAULT,
 	};
 	vm_fault_t ret = 0;

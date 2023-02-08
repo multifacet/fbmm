@@ -25,27 +25,27 @@
 
 // A lot of the boilerplate here is taken from the ramfs code
 
-static const struct super_operations fomtierfs_ops;
-static const struct inode_operations fomtierfs_dir_inode_operations;
+static const struct super_operations tieredmmfs_ops;
+static const struct inode_operations tieredmmfs_dir_inode_operations;
 
 // This is a copy of the sb_info struct. It should only be used in sysfs files
-static struct fomtierfs_sb_info *sysfs_sb_info = NULL;
+static struct tieredmmfs_sb_info *sysfs_sb_info = NULL;
 static u64 num_promotions = 0;
 static u64 num_demotions = 0;
 static ktime_t extra_fault_time = 0;
 static u64 migrate_task_int = 5000;
 
-struct fomtierfs_sb_info *FTFS_SB(struct super_block *sb)
+struct tieredmmfs_sb_info *FTFS_SB(struct super_block *sb)
 {
     return sb->s_fs_info;
 }
 
-struct fomtierfs_inode_info *FTFS_I(struct inode *inode)
+struct tieredmmfs_inode_info *FTFS_I(struct inode *inode)
 {
     return inode->i_private;
 }
 
-static inline void fomtierfs_nt_zero(void *kaddr)
+static inline void tieredmmfs_nt_zero(void *kaddr)
 {
 	__asm__ (
 		"push %%rax;"
@@ -76,7 +76,7 @@ static inline void fomtierfs_nt_zero(void *kaddr)
 	);
 }
 
-static inline void fomtierfs_nt_copy(void *to, void *from)
+static inline void tieredmmfs_nt_copy(void *to, void *from)
 {
 	__asm__ (
 		"push %%rax;"
@@ -117,10 +117,10 @@ static inline void fomtierfs_nt_copy(void *to, void *from)
 	);
 }
 
-struct fomtierfs_page *fomtierfs_alloc_page(struct inode *inode, struct fomtierfs_sb_info *sbi, u64 page_offset)
+struct tieredmmfs_page *tieredmmfs_alloc_page(struct inode *inode, struct tieredmmfs_sb_info *sbi, u64 page_offset)
 {
-    struct fomtierfs_page *page;
-    struct fomtierfs_dev_info *prim, *sec;
+    struct tieredmmfs_page *page;
+    struct tieredmmfs_dev_info *prim, *sec;
     void* virt_addr;
     int i;
 
@@ -139,7 +139,7 @@ struct fomtierfs_page *fomtierfs_alloc_page(struct inode *inode, struct fomtierf
         if (!list_empty(&sec->free_list)) {
             prim = sec;
         } else {
-            pr_err("FOMTierFS: No more entries in the free list");
+            pr_err("TieredMMFS: No more entries in the free list");
             return NULL;
         }
     }
@@ -147,7 +147,7 @@ struct fomtierfs_page *fomtierfs_alloc_page(struct inode *inode, struct fomtierf
     spin_lock(&prim->lock);
 
     // Take a page from the free list
-    page = list_first_entry(&prim->free_list, struct fomtierfs_page, list);
+    page = list_first_entry(&prim->free_list, struct tieredmmfs_page, list);
     list_del(&page->list);
     prim->free_pages--;
 
@@ -166,14 +166,14 @@ struct fomtierfs_page *fomtierfs_alloc_page(struct inode *inode, struct fomtierf
 
     virt_addr = prim->virt_addr + (page->page_num << sbi->page_shift);
     for (i = 0; i < sbi->page_size / PAGE_SIZE; i++)
-        fomtierfs_nt_zero(virt_addr + (i << PAGE_SHIFT));
+        tieredmmfs_nt_zero(virt_addr + (i << PAGE_SHIFT));
 
     return page;
 }
 
-void fomtierfs_return_page(struct fomtierfs_sb_info *sbi, struct fomtierfs_page *page)
+void tieredmmfs_return_page(struct tieredmmfs_sb_info *sbi, struct tieredmmfs_page *page)
 {
-    struct fomtierfs_dev_info *dev;
+    struct tieredmmfs_dev_info *dev;
 
     dev = &sbi->mem[page->type];
 
@@ -196,19 +196,19 @@ void fomtierfs_return_page(struct fomtierfs_sb_info *sbi, struct fomtierfs_page 
     spin_unlock(&dev->lock);
 }
 
-static long fomtierfs_free_range(struct inode *inode, loff_t offset, loff_t len)
+static long tieredmmfs_free_range(struct inode *inode, loff_t offset, loff_t len)
 {
-    struct fomtierfs_sb_info *sbi = FTFS_SB(inode->i_sb);
-    struct fomtierfs_inode_info *inode_info = FTFS_I(inode);
+    struct tieredmmfs_sb_info *sbi = FTFS_SB(inode->i_sb);
+    struct tieredmmfs_inode_info *inode_info = FTFS_I(inode);
     struct rb_node *node, *next_node;
-    struct fomtierfs_page *page;
+    struct tieredmmfs_page *page;
     u64 page_offset = offset >> sbi->page_shift;
     u64 num_pages = len >> sbi->page_shift;
 
     write_lock(&inode_info->map_lock);
     // TODO: Change this to instead of needing the page at the offset,
     // just find the first mapping with an offset >= the requested offset.
-    page = fomtierfs_find_page(&inode_info->page_maps, offset);
+    page = tieredmmfs_find_page(&inode_info->page_maps, offset);
     if (!page) {
         return 0;
     }
@@ -218,11 +218,11 @@ static long fomtierfs_free_range(struct inode *inode, loff_t offset, loff_t len)
         next_node = rb_next(node);
         rb_erase(node, &inode_info->page_maps);
 
-        // fomtierfs_return_page take the fomtierfs_dev_info.lock and fomtierfs_page.lock
+        // tieredmmfs_return_page take the tieredmmfs_dev_info.lock and tieredmmfs_page.lock
         // which have higher priority than inode_info->map_lock, so we have to give it up
         write_unlock(&inode_info->map_lock);
 
-        fomtierfs_return_page(sbi, page);
+        tieredmmfs_return_page(sbi, page);
 
         if (!next_node)
             break;
@@ -231,7 +231,7 @@ static long fomtierfs_free_range(struct inode *inode, loff_t offset, loff_t len)
         write_lock(&inode_info->map_lock);
 
         node = next_node;
-        page = container_of(node, struct fomtierfs_page, node);
+        page = container_of(node, struct tieredmmfs_page, node);
     }
 
     write_unlock(&inode_info->map_lock);
@@ -239,7 +239,7 @@ static long fomtierfs_free_range(struct inode *inode, loff_t offset, loff_t len)
     return 0;
 }
 
-static pmd_t *fomtierfs_find_pmd(struct vm_area_struct *vma, u64 address)
+static pmd_t *tieredmmfs_find_pmd(struct vm_area_struct *vma, u64 address)
 {
     pgd_t *pgd;
     p4d_t *p4d;
@@ -268,11 +268,11 @@ static pmd_t *fomtierfs_find_pmd(struct vm_area_struct *vma, u64 address)
 
 // The locks for to_page and from_page should be taken.
 // The inode_info->map_lock should be taken in write mode
-static void migrate_page(struct fomtierfs_sb_info *sbi, struct fomtierfs_inode_info *inode_info,
-        struct fomtierfs_page *to_page, struct fomtierfs_page *from_page,
+static void migrate_page(struct tieredmmfs_sb_info *sbi, struct tieredmmfs_inode_info *inode_info,
+        struct tieredmmfs_page *to_page, struct tieredmmfs_page *from_page,
         struct vm_area_struct *vma, unsigned long virt_addr, pmd_t *pmdp)
 {
-    struct fomtierfs_dev_info *to_dev, *from_dev;
+    struct tieredmmfs_dev_info *to_dev, *from_dev;
     void *to_addr, *from_addr;
     bool writeable = false;
     int i;
@@ -311,7 +311,7 @@ static void migrate_page(struct fomtierfs_sb_info *sbi, struct fomtierfs_inode_i
     from_addr = from_dev->virt_addr + (from_page->page_num << sbi->page_shift);
     for (i = 0; i < sbi->page_size / PAGE_SIZE; i++) {
         u64 off = i << PAGE_SHIFT;
-        fomtierfs_nt_copy(to_addr + off, from_addr + off);
+        tieredmmfs_nt_copy(to_addr + off, from_addr + off);
     }
 
     // Copy the metadata
@@ -321,7 +321,7 @@ static void migrate_page(struct fomtierfs_sb_info *sbi, struct fomtierfs_inode_i
     to_page->last_accessed = false;
 
     // Replace the olf page with the new page in the map tree
-    fomtierfs_replace_page(&inode_info->page_maps, to_page);
+    tieredmmfs_replace_page(&inode_info->page_maps, to_page);
 
     // The from page is about to be put in the free list, so clear it
     from_page->page_offset = 0;
@@ -355,7 +355,7 @@ static void migrate_page(struct fomtierfs_sb_info *sbi, struct fomtierfs_inode_i
     }
 }
 
-static bool fomtierfs_page_accessed(struct fomtierfs_page *page, u64 virt_addr, pmd_t *pmdp)
+static bool tieredmmfs_page_accessed(struct tieredmmfs_page *page, u64 virt_addr, pmd_t *pmdp)
 {
     int i;
     pte_t *ptep;
@@ -376,7 +376,7 @@ static bool fomtierfs_page_accessed(struct fomtierfs_page *page, u64 virt_addr, 
     return false;
 }
 
-static void fomtierfs_page_mkold(struct vm_area_struct *vma, struct fomtierfs_page *page,
+static void tieredmmfs_page_mkold(struct vm_area_struct *vma, struct tieredmmfs_page *page,
         u64 virt_addr, pmd_t *pmdp)
 {
     int i;
@@ -399,12 +399,12 @@ static void fomtierfs_page_mkold(struct vm_area_struct *vma, struct fomtierfs_pa
     }
 }
 
-static void fomtierfs_demote_one(struct fomtierfs_sb_info *sbi, struct fomtierfs_page **slow_page)
+static void tieredmmfs_demote_one(struct tieredmmfs_sb_info *sbi, struct tieredmmfs_page **slow_page)
 {
-    struct fomtierfs_inode_info *inode_info;
-    struct fomtierfs_dev_info *fast_dev = &sbi->mem[FAST_MEM];
-    struct fomtierfs_dev_info *slow_dev = &sbi->mem[SLOW_MEM];
-    struct fomtierfs_page *page;
+    struct tieredmmfs_inode_info *inode_info;
+    struct tieredmmfs_dev_info *fast_dev = &sbi->mem[FAST_MEM];
+    struct tieredmmfs_dev_info *slow_dev = &sbi->mem[SLOW_MEM];
+    struct tieredmmfs_page *page;
     struct vm_area_struct *vma;
     struct address_space *as;
     bool accessed, last_accessed;
@@ -413,7 +413,7 @@ static void fomtierfs_demote_one(struct fomtierfs_sb_info *sbi, struct fomtierfs
 
     // Grab the page at the end of the active list
     spin_lock(&fast_dev->lock);
-    page = list_last_entry(&fast_dev->active_list, struct fomtierfs_page, list);
+    page = list_last_entry(&fast_dev->active_list, struct tieredmmfs_page, list);
     list_del(&page->list);
     fast_dev->active_pages--;
 
@@ -442,7 +442,7 @@ static void fomtierfs_demote_one(struct fomtierfs_sb_info *sbi, struct fomtierfs
     }
     virt_addr = vma->vm_start
         + ((page->page_offset << sbi->page_shift) - (vma->vm_pgoff << PAGE_SHIFT));
-    pmdp = fomtierfs_find_pmd(vma, virt_addr);
+    pmdp = tieredmmfs_find_pmd(vma, virt_addr);
     if (!pmdp || !pmd_present(*pmdp)) {
         list_add(&page->list, &fast_dev->active_list);
         fast_dev->active_pages++;
@@ -453,14 +453,14 @@ static void fomtierfs_demote_one(struct fomtierfs_sb_info *sbi, struct fomtierfs
         return;
     }
 
-    accessed = fomtierfs_page_accessed(page, virt_addr, pmdp);
+    accessed = tieredmmfs_page_accessed(page, virt_addr, pmdp);
     last_accessed = page->last_accessed;
     page->last_accessed = accessed;
 
     // Only demote if this page hasn't been accessed in either of
     // the last couple of checks
     if (accessed || last_accessed) {
-        fomtierfs_page_mkold(vma, page, virt_addr, pmdp);
+        tieredmmfs_page_mkold(vma, page, virt_addr, pmdp);
 
         // The page was accessed recently, so put it back and move
         // on to the next one.
@@ -512,12 +512,12 @@ static void fomtierfs_demote_one(struct fomtierfs_sb_info *sbi, struct fomtierfs
     num_demotions++;
 }
 
-static void fomtierfs_promote_one(struct fomtierfs_sb_info *sbi, struct fomtierfs_page **fast_page)
+static void tieredmmfs_promote_one(struct tieredmmfs_sb_info *sbi, struct tieredmmfs_page **fast_page)
 {
-    struct fomtierfs_inode_info *inode_info;
-    struct fomtierfs_dev_info *fast_dev = &sbi->mem[FAST_MEM];
-    struct fomtierfs_dev_info *slow_dev = &sbi->mem[SLOW_MEM];
-    struct fomtierfs_page *page;
+    struct tieredmmfs_inode_info *inode_info;
+    struct tieredmmfs_dev_info *fast_dev = &sbi->mem[FAST_MEM];
+    struct tieredmmfs_dev_info *slow_dev = &sbi->mem[SLOW_MEM];
+    struct tieredmmfs_page *page;
     struct vm_area_struct *vma;
     struct address_space *as;
     bool accessed, last_accessed;
@@ -526,7 +526,7 @@ static void fomtierfs_promote_one(struct fomtierfs_sb_info *sbi, struct fomtierf
 
     // Grab the page at the end of the active list
     spin_lock(&slow_dev->lock);
-    page = list_last_entry(&slow_dev->active_list, struct fomtierfs_page, list);
+    page = list_last_entry(&slow_dev->active_list, struct tieredmmfs_page, list);
     list_del(&page->list);
     slow_dev->active_pages--;
 
@@ -555,7 +555,7 @@ static void fomtierfs_promote_one(struct fomtierfs_sb_info *sbi, struct fomtierf
     }
     virt_addr = vma->vm_start
         + ((page->page_offset << sbi->page_shift)- (vma->vm_pgoff << PAGE_SHIFT));
-    pmdp = fomtierfs_find_pmd(vma, virt_addr);
+    pmdp = tieredmmfs_find_pmd(vma, virt_addr);
     if (!pmdp || !pmd_present(*pmdp)) {
         list_add(&page->list, &slow_dev->active_list);
         slow_dev->active_pages++;
@@ -566,13 +566,13 @@ static void fomtierfs_promote_one(struct fomtierfs_sb_info *sbi, struct fomtierf
         return;
     }
 
-    accessed = fomtierfs_page_accessed(page, virt_addr, pmdp);
+    accessed = tieredmmfs_page_accessed(page, virt_addr, pmdp);
     last_accessed = page->last_accessed;
     page->last_accessed = accessed;
 
     // Reset the accessed bit if we need to
     if (accessed)
-        fomtierfs_page_mkold(vma, page, virt_addr, pmdp);
+        tieredmmfs_page_mkold(vma, page, virt_addr, pmdp);
 
     // Only promote if the page has been accessed in both of the last
     // couple of checks.
@@ -626,15 +626,15 @@ static void fomtierfs_promote_one(struct fomtierfs_sb_info *sbi, struct fomtierf
 }
 
 // Reader Beware: This function is a mess of locking and unlocking
-static int fomtierfs_demote_task(void *data)
+static int tieredmmfs_demote_task(void *data)
 {
     // The maximum number of pages to migrate in one iteration
     const u64 MAX_MIGRATE = 1 << 20;
-    struct fomtierfs_page *slow_page = NULL;
-    struct fomtierfs_page *fast_page = NULL;
-    struct fomtierfs_sb_info *sbi = data;
-    struct fomtierfs_dev_info *fast_dev = &sbi->mem[FAST_MEM];
-    struct fomtierfs_dev_info *slow_dev = &sbi->mem[SLOW_MEM];
+    struct tieredmmfs_page *slow_page = NULL;
+    struct tieredmmfs_page *fast_page = NULL;
+    struct tieredmmfs_sb_info *sbi = data;
+    struct tieredmmfs_dev_info *fast_dev = &sbi->mem[FAST_MEM];
+    struct tieredmmfs_dev_info *slow_dev = &sbi->mem[SLOW_MEM];
     u64 pages_to_check;
     u64 i;
 
@@ -661,13 +661,13 @@ static int fomtierfs_demote_task(void *data)
                     break;
                 }
 
-                slow_page = list_first_entry(&slow_dev->free_list, struct fomtierfs_page, list);
+                slow_page = list_first_entry(&slow_dev->free_list, struct tieredmmfs_page, list);
                 list_del(&slow_page->list);
                 slow_dev->free_pages--;
                 spin_unlock(&slow_dev->lock);
             }
 
-            fomtierfs_demote_one(sbi, &slow_page);
+            tieredmmfs_demote_one(sbi, &slow_page);
         }
 
         // If we have a slow_page left over, put it back in the free list
@@ -697,13 +697,13 @@ static int fomtierfs_demote_task(void *data)
                     break;
                 }
 
-                fast_page = list_first_entry(&fast_dev->free_list, struct fomtierfs_page, list);
+                fast_page = list_first_entry(&fast_dev->free_list, struct tieredmmfs_page, list);
                 list_del(&fast_page->list);
                 fast_dev->free_pages--;
                 spin_unlock(&fast_dev->lock);
             }
 
-            fomtierfs_promote_one(sbi, &fast_page);
+            tieredmmfs_promote_one(sbi, &fast_page);
         }
 
         // If we have a fast_page left over, put it back in the free list
@@ -721,12 +721,12 @@ static int fomtierfs_demote_task(void *data)
     return 0;
 }
 
-static int fomtierfs_iomap_begin(struct inode *inode, loff_t offset, loff_t length,
+static int tieredmmfs_iomap_begin(struct inode *inode, loff_t offset, loff_t length,
                 unsigned flags, struct iomap *iomap, struct iomap *srcmap)
 {
-    struct fomtierfs_sb_info *sbi = FTFS_SB(inode->i_sb);
-    struct fomtierfs_inode_info *inode_info = FTFS_I(inode);
-    struct fomtierfs_page *page;
+    struct tieredmmfs_sb_info *sbi = FTFS_SB(inode->i_sb);
+    struct tieredmmfs_inode_info *inode_info = FTFS_I(inode);
+    struct tieredmmfs_page *page;
     u64 page_offset;
     u64 page_shift;
     u64 base_page_offset;
@@ -751,19 +751,19 @@ static int fomtierfs_iomap_begin(struct inode *inode, loff_t offset, loff_t leng
     iomap->length = length;
 
     read_lock(&inode_info->map_lock);
-    page = fomtierfs_find_page(&inode_info->page_maps, page_offset);
+    page = tieredmmfs_find_page(&inode_info->page_maps, page_offset);
 
     if (!page) {
         read_unlock(&inode_info->map_lock);
 
-        page = fomtierfs_alloc_page(inode, sbi, page_offset);
+        page = tieredmmfs_alloc_page(inode, sbi, page_offset);
         if (!page) {
             return -ENOMEM;
         }
 
         // Save this new mapping
         write_lock(&inode_info->map_lock);
-        if (!fomtierfs_insert_page(&inode_info->page_maps, page)) {
+        if (!tieredmmfs_insert_page(&inode_info->page_maps, page)) {
             BUG();
         }
 
@@ -789,80 +789,80 @@ static int fomtierfs_iomap_begin(struct inode *inode, loff_t offset, loff_t leng
     return 0;
 }
 
-static int fomtierfs_iomap_end(struct inode *inode, loff_t offset, loff_t length,
+static int tieredmmfs_iomap_end(struct inode *inode, loff_t offset, loff_t length,
                 ssize_t written, unsigned flags, struct iomap *iomap)
 {
     return 0;
 }
 
-const struct iomap_ops fomtierfs_iomap_ops = {
-    .iomap_begin = fomtierfs_iomap_begin,
-    .iomap_end = fomtierfs_iomap_end,
+const struct iomap_ops tieredmmfs_iomap_ops = {
+    .iomap_begin = tieredmmfs_iomap_begin,
+    .iomap_end = tieredmmfs_iomap_end,
 };
 
-static vm_fault_t fomtierfs_huge_fault(struct vm_fault *vmf, enum page_entry_size pe_size)
+static vm_fault_t tieredmmfs_huge_fault(struct vm_fault *vmf, enum page_entry_size pe_size)
 {
     vm_fault_t result = 0;
     pfn_t pfn;
     int error;
 
-    result = dax_iomap_fault(vmf, pe_size, &pfn, &error, &fomtierfs_iomap_ops);
+    result = dax_iomap_fault(vmf, pe_size, &pfn, &error, &tieredmmfs_iomap_ops);
 
     return result;
 }
 
-static vm_fault_t fomtierfs_fault(struct vm_fault *vmf)
+static vm_fault_t tieredmmfs_fault(struct vm_fault *vmf)
 {
-    return fomtierfs_huge_fault(vmf, PE_SIZE_PTE);
+    return tieredmmfs_huge_fault(vmf, PE_SIZE_PTE);
 }
 
-static struct vm_operations_struct fomtierfs_vm_ops = {
-    .fault = fomtierfs_fault,
-    .huge_fault = fomtierfs_huge_fault,
-    .page_mkwrite = fomtierfs_fault,
-    .pfn_mkwrite = fomtierfs_fault,
+static struct vm_operations_struct tieredmmfs_vm_ops = {
+    .fault = tieredmmfs_fault,
+    .huge_fault = tieredmmfs_huge_fault,
+    .page_mkwrite = tieredmmfs_fault,
+    .pfn_mkwrite = tieredmmfs_fault,
 };
 
-static int fomtierfs_mmap(struct file *file, struct vm_area_struct *vma)
+static int tieredmmfs_mmap(struct file *file, struct vm_area_struct *vma)
 {
     file_accessed(file); // TODO: probably don't need this
-    vma->vm_ops = &fomtierfs_vm_ops;
+    vma->vm_ops = &tieredmmfs_vm_ops;
     vma->vm_flags |= VM_MIXEDMAP | VM_HUGEPAGE;
 
     return 0;
 }
 
-static unsigned long fomtierfs_mmu_get_unmapped_area(struct file *file,
+static unsigned long tieredmmfs_mmu_get_unmapped_area(struct file *file,
 		unsigned long addr, unsigned long len, unsigned long pgoff,
 		unsigned long flags)
 {
     return thp_get_unmapped_area(file, addr, len, pgoff, flags);
 }
 
-static long fomtierfs_fallocate(struct file *file, int mode, loff_t offset, loff_t len)
+static long tieredmmfs_fallocate(struct file *file, int mode, loff_t offset, loff_t len)
 {
     struct inode *inode = file_inode(file);
-    struct fomtierfs_sb_info *sbi = FTFS_SB(inode->i_sb);
-    struct fomtierfs_inode_info *inode_info = FTFS_I(inode);
-    struct fomtierfs_page *page;
+    struct tieredmmfs_sb_info *sbi = FTFS_SB(inode->i_sb);
+    struct tieredmmfs_inode_info *inode_info = FTFS_I(inode);
+    struct tieredmmfs_page *page;
     loff_t off;
 
     if (mode & FALLOC_FL_PUNCH_HOLE) {
-        return fomtierfs_free_range(inode, offset, len);
+        return tieredmmfs_free_range(inode, offset, len);
     } else if (mode != 0) {
         return -EOPNOTSUPP;
     }
 
     // Allocate and add mappings for the desired range
     for (off = offset; off < offset + len; off += sbi->page_size) {
-        page = fomtierfs_alloc_page(inode, sbi, off >> sbi->page_shift);
+        page = tieredmmfs_alloc_page(inode, sbi, off >> sbi->page_shift);
         if (!page) {
             return -ENOMEM;
         }
 
         // We normally need to grab inode_info->map_lock, but
         // since this page is being fallocated, it isn't shared yet.
-        if (!fomtierfs_insert_page(&inode_info->page_maps, page)) {
+        if (!tieredmmfs_insert_page(&inode_info->page_maps, page)) {
             BUG();
         }
     }
@@ -870,38 +870,38 @@ static long fomtierfs_fallocate(struct file *file, int mode, loff_t offset, loff
     return 0;
 }
 
-const struct file_operations fomtierfs_file_operations = {
-    .mmap		= fomtierfs_mmap,
+const struct file_operations tieredmmfs_file_operations = {
+    .mmap		= tieredmmfs_mmap,
     .mmap_supported_flags = MAP_SYNC,
     .fsync		= noop_fsync,
     .splice_read	= generic_file_splice_read,
     .splice_write	= iter_file_splice_write,
     .llseek		= generic_file_llseek,
-    .get_unmapped_area	= fomtierfs_mmu_get_unmapped_area,
-    .fallocate = fomtierfs_fallocate,
+    .get_unmapped_area	= tieredmmfs_mmu_get_unmapped_area,
+    .fallocate = tieredmmfs_fallocate,
 };
 
-const struct inode_operations fomtierfs_file_inode_operations = {
+const struct inode_operations tieredmmfs_file_inode_operations = {
 	.setattr	= simple_setattr,
 	.getattr	= simple_getattr,
 };
 
-const struct address_space_operations fomtierfs_aops = {
+const struct address_space_operations tieredmmfs_aops = {
     .direct_IO = noop_direct_IO,
     .set_page_dirty = __set_page_dirty_no_writeback,
     .invalidatepage = noop_invalidatepage,
 };
 
-struct inode *fomtierfs_get_inode(struct super_block *sb,
+struct inode *tieredmmfs_get_inode(struct super_block *sb,
                 const struct inode *dir, umode_t mode, dev_t dev)
 {
     struct inode *inode = new_inode(sb);
-    struct fomtierfs_inode_info *info;
+    struct tieredmmfs_inode_info *info;
 
     if (!inode)
         return NULL;
 
-    info = kzalloc(sizeof(struct fomtierfs_inode_info), GFP_KERNEL);
+    info = kzalloc(sizeof(struct tieredmmfs_inode_info), GFP_KERNEL);
     if (!info) {
         pr_err("FOMTierFS: Failure allocating FOMTierFS inode");
         return NULL;
@@ -911,17 +911,17 @@ struct inode *fomtierfs_get_inode(struct super_block *sb,
 
     inode->i_ino = get_next_ino();
     inode_init_owner(&init_user_ns, inode, dir, mode);
-    inode->i_mapping->a_ops = &fomtierfs_aops;
+    inode->i_mapping->a_ops = &tieredmmfs_aops;
     inode->i_atime = inode->i_mtime = inode->i_ctime = current_time(inode);
     inode->i_flags |= S_DAX;
     inode->i_private = info;
     switch (mode & S_IFMT) {
         case S_IFREG:
-            inode->i_op = &fomtierfs_file_inode_operations;
-            inode->i_fop = &fomtierfs_file_operations;
+            inode->i_op = &tieredmmfs_file_inode_operations;
+            inode->i_fop = &tieredmmfs_file_operations;
             break;
         case S_IFDIR:
-            inode->i_op = &fomtierfs_dir_inode_operations;
+            inode->i_op = &tieredmmfs_dir_inode_operations;
             inode->i_fop = &simple_dir_operations;
 
             /* Directory inodes start off with i_nlink == 2 (for "." entry) */
@@ -935,10 +935,10 @@ struct inode *fomtierfs_get_inode(struct super_block *sb,
 }
 
 static int
-fomtierfs_mknod(struct user_namespace *mnt_userns, struct inode *dir,
+tieredmmfs_mknod(struct user_namespace *mnt_userns, struct inode *dir,
         struct dentry *dentry, umode_t mode, dev_t dev)
 {
-    struct inode * inode = fomtierfs_get_inode(dir->i_sb, dir, mode, dev);
+    struct inode * inode = tieredmmfs_get_inode(dir->i_sb, dir, mode, dev);
     int error = -ENOSPC;
 
     if (inode) {
@@ -951,53 +951,53 @@ fomtierfs_mknod(struct user_namespace *mnt_userns, struct inode *dir,
     return error;
 }
 
-static int fomtierfs_mkdir(struct user_namespace *mnt_userns, struct inode *dir,
+static int tieredmmfs_mkdir(struct user_namespace *mnt_userns, struct inode *dir,
                 struct dentry *dentry, umode_t mode)
 {
     return -EINVAL;
 }
 
-static int fomtierfs_create(struct user_namespace *mnt_userns, struct inode *dir,
+static int tieredmmfs_create(struct user_namespace *mnt_userns, struct inode *dir,
                 struct dentry *dentry, umode_t mode, bool excl)
 {
-    return fomtierfs_mknod(&init_user_ns, dir, dentry, 0777 | S_IFREG, 0);
+    return tieredmmfs_mknod(&init_user_ns, dir, dentry, 0777 | S_IFREG, 0);
 }
 
-static int fomtierfs_symlink(struct user_namespace *mnt_userns, struct inode *dir,
+static int tieredmmfs_symlink(struct user_namespace *mnt_userns, struct inode *dir,
                 struct dentry *dentry, const char *symname)
 {
     return -EINVAL;
 }
 
-static int fomtierfs_tmpfile(struct user_namespace *mnt_userns,
+static int tieredmmfs_tmpfile(struct user_namespace *mnt_userns,
             struct inode *dir, struct dentry *dentry, umode_t mode)
 {
     struct inode *inode;
 
-    inode = fomtierfs_get_inode(dir->i_sb, dir, mode, 0);
+    inode = tieredmmfs_get_inode(dir->i_sb, dir, mode, 0);
     if (!inode)
         return -ENOSPC;
     d_tmpfile(dentry, inode);
     return 0;
 }
 
-static const struct inode_operations fomtierfs_dir_inode_operations = {
-	.create		= fomtierfs_create,
+static const struct inode_operations tieredmmfs_dir_inode_operations = {
+	.create		= tieredmmfs_create,
 	.lookup		= simple_lookup,
 	.link		= simple_link,
 	.unlink		= simple_unlink,
-	.symlink	= fomtierfs_symlink,
-	.mkdir		= fomtierfs_mkdir,
+	.symlink	= tieredmmfs_symlink,
+	.mkdir		= tieredmmfs_mkdir,
 	.rmdir		= simple_rmdir,
-	.mknod		= fomtierfs_mknod,
+	.mknod		= tieredmmfs_mknod,
 	.rename		= simple_rename,
-	.tmpfile	= fomtierfs_tmpfile,
+	.tmpfile	= tieredmmfs_tmpfile,
 };
 
-static int fomtierfs_statfs(struct dentry *dentry, struct kstatfs *buf)
+static int tieredmmfs_statfs(struct dentry *dentry, struct kstatfs *buf)
 {
     struct super_block *sb = dentry->d_sb;
-    struct fomtierfs_sb_info *sbi = FTFS_SB(sb);
+    struct tieredmmfs_sb_info *sbi = FTFS_SB(sb);
 
     buf->f_type = sb->s_magic;
     buf->f_bsize = sbi->page_size;
@@ -1010,24 +1010,24 @@ static int fomtierfs_statfs(struct dentry *dentry, struct kstatfs *buf)
     return 0;
 }
 
-static void fomtierfs_free_inode(struct inode *inode) {
-    struct fomtierfs_sb_info *sbi = FTFS_SB(inode->i_sb);
-    struct fomtierfs_inode_info *inode_info = FTFS_I(inode);
+static void tieredmmfs_free_inode(struct inode *inode) {
+    struct tieredmmfs_sb_info *sbi = FTFS_SB(inode->i_sb);
+    struct tieredmmfs_inode_info *inode_info = FTFS_I(inode);
     struct rb_node *node = inode_info->page_maps.rb_node;
-    struct fomtierfs_page *page;
+    struct tieredmmfs_page *page;
 
     // Free each mapping in the inode, and place each page back into the free list
     write_lock(&inode_info->map_lock);
     while (node) {
-        page = container_of(node, struct fomtierfs_page, node);
+        page = container_of(node, struct tieredmmfs_page, node);
 
         rb_erase(node, &inode_info->page_maps);
 
-        // fomtierfs_return_page take the fomtierfs_dev_info.lock and fomtierfs_page.lock
+        // tieredmmfs_return_page take the tieredmmfs_dev_info.lock and tieredmmfs_page.lock
         // which have higher priority than inode_info->map_lock, so we have to give it up
         write_unlock(&inode_info->map_lock);
 
-        fomtierfs_return_page(sbi, page);
+        tieredmmfs_return_page(sbi, page);
 
         write_lock(&inode_info->map_lock);
 
@@ -1039,36 +1039,36 @@ static void fomtierfs_free_inode(struct inode *inode) {
 
 }
 
-static int fomtierfs_show_options(struct seq_file *m, struct dentry *root)
+static int tieredmmfs_show_options(struct seq_file *m, struct dentry *root)
 {
     return 0;
 }
 
-static const struct super_operations fomtierfs_ops = {
-	.statfs		= fomtierfs_statfs,
-    .free_inode = fomtierfs_free_inode,
+static const struct super_operations tieredmmfs_ops = {
+	.statfs		= tieredmmfs_statfs,
+    .free_inode = tieredmmfs_free_inode,
 	.drop_inode	= generic_delete_inode,
-	.show_options	= fomtierfs_show_options,
+	.show_options	= tieredmmfs_show_options,
 };
 
-enum fomtierfs_param {
+enum tieredmmfs_param {
     Opt_slowmem, Opt_source, Opt_basepage,
 };
 
-const struct fs_parameter_spec fomtierfs_fs_parameters[] = {
+const struct fs_parameter_spec tieredmmfs_fs_parameters[] = {
     fsparam_string("slowmem", Opt_slowmem),
     fsparam_string("source", Opt_source),
     fsparam_bool("basepage", Opt_basepage),
     {},
 };
 
-static int fomtierfs_parse_param(struct fs_context *fc, struct fs_parameter *param)
+static int tieredmmfs_parse_param(struct fs_context *fc, struct fs_parameter *param)
 {
     struct fs_parse_result result;
-    struct fomtierfs_context_info *fc_info = (struct fomtierfs_context_info*)fc->fs_private;
+    struct tieredmmfs_context_info *fc_info = (struct tieredmmfs_context_info*)fc->fs_private;
     int opt;
 
-    opt = fs_parse(fc, fomtierfs_fs_parameters, param, &result);
+    opt = fs_parse(fc, tieredmmfs_fs_parameters, param, &result);
 	if (opt < 0) {
 		/*
 		 * We might like to report bad mount options here;
@@ -1092,20 +1092,20 @@ static int fomtierfs_parse_param(struct fs_context *fc, struct fs_parameter *par
         fc_info->base_pages = result.boolean;
         break;
     default:
-        pr_err("FOMTierFS: unrecognized option %s", param->key);
+        pr_err("TieredMMFS: unrecognized option %s", param->key);
         break;
     }
 
     return 0;
 }
 
-static int fomtierfs_populate_dev_info(struct fomtierfs_sb_info *sbi, struct block_device *bdev, enum fomtierfs_mem_type type)
+static int tieredmmfs_populate_dev_info(struct tieredmmfs_sb_info *sbi, struct block_device *bdev, enum tieredmmfs_mem_type type)
 {
     int ret = 0;
     long i;
     long num_base_pages;
-    struct fomtierfs_dev_info *di = &sbi->mem[type];
-    struct fomtierfs_page *cursor, *temp;
+    struct tieredmmfs_dev_info *di = &sbi->mem[type];
+    struct tieredmmfs_page *cursor, *temp;
     // dax_direct_access returns the number of base pages.
     // We want to work with pages of the size sbi->page_size, so calcualate
     // this ratio to convert between them.
@@ -1118,7 +1118,7 @@ static int fomtierfs_populate_dev_info(struct fomtierfs_sb_info *sbi, struct blo
     num_base_pages = dax_direct_access(di->daxdev, 0, LONG_MAX / PAGE_SIZE,
                     &di->virt_addr, &di->pfn);
     if (num_base_pages <= 0) {
-        pr_err("FOMTierFS: Determining device size failed");
+        pr_err("TieredMMFS: Determining device size failed");
         return -EIO;
     }
 
@@ -1131,7 +1131,7 @@ static int fomtierfs_populate_dev_info(struct fomtierfs_sb_info *sbi, struct blo
 
     // Put all of the pages into the free list
     for (i = 0; i < di->num_pages; i++) {
-        struct fomtierfs_page *page = kzalloc(sizeof(struct fomtierfs_page), GFP_KERNEL);
+        struct tieredmmfs_page *page = kzalloc(sizeof(struct tieredmmfs_page), GFP_KERNEL);
         if (!page) {
             ret = -ENOMEM;
             goto err;
@@ -1158,12 +1158,12 @@ err:
     return ret;
 }
 
-static int fomtierfs_fill_super(struct super_block *sb, struct fs_context *fc)
+static int tieredmmfs_fill_super(struct super_block *sb, struct fs_context *fc)
 {
     struct inode *inode;
     struct block_device *slow_dev;
-    struct fomtierfs_sb_info *sbi = kzalloc(sizeof(struct fomtierfs_sb_info), GFP_KERNEL);
-    struct fomtierfs_context_info *fc_info = (struct fomtierfs_context_info*)fc->fs_private;
+    struct tieredmmfs_sb_info *sbi = kzalloc(sizeof(struct tieredmmfs_sb_info), GFP_KERNEL);
+    struct tieredmmfs_context_info *fc_info = (struct tieredmmfs_context_info*)fc->fs_private;
     int ret;
 
     if (fc_info->base_pages) {
@@ -1177,17 +1177,17 @@ static int fomtierfs_fill_super(struct super_block *sb, struct fs_context *fc)
     sb->s_fs_info = sbi;
     sb->s_maxbytes = MAX_LFS_FILESIZE;
     sb->s_magic = 0xDEADBEEF;
-    sb->s_op = &fomtierfs_ops;
+    sb->s_op = &tieredmmfs_ops;
     sb->s_time_gran = 1;
     // The blocksize cannot be larger than PAGE_SIZE
     if(!sb_set_blocksize(sb, PAGE_SIZE)) {
-        pr_err("FOMTierFS: error setting blocksize");
+        pr_err("TieredMMFS: error setting blocksize");
     }
 
     // Populate the device information for the fast and slow mem
-    ret = fomtierfs_populate_dev_info(sbi, sb->s_bdev, FAST_MEM);
+    ret = tieredmmfs_populate_dev_info(sbi, sb->s_bdev, FAST_MEM);
     if (ret != 0) {
-        pr_err("FOMTierFS: Error populating fast mem device information");
+        pr_err("TieredMMFS: Error populating fast mem device information");
         kfree(sbi);
         return ret;
     }
@@ -1195,18 +1195,18 @@ static int fomtierfs_fill_super(struct super_block *sb, struct fs_context *fc)
     slow_dev = blkdev_get_by_path(fc_info->slow_dev_name, FMODE_READ|FMODE_WRITE|FMODE_EXCL, sbi);
     if (IS_ERR(slow_dev)) {
         ret = PTR_ERR(slow_dev);
-        pr_err("FOMTierFS: Error opening slow mem device %s %d", fc_info->slow_dev_name, ret);
+        pr_err("TieredMMFS: Error opening slow mem device %s %d", fc_info->slow_dev_name, ret);
         kfree(sbi);
         return ret;
     }
-    ret = fomtierfs_populate_dev_info(sbi, slow_dev, SLOW_MEM);
+    ret = tieredmmfs_populate_dev_info(sbi, slow_dev, SLOW_MEM);
     if (ret != 0) {
-        pr_err("FOMTierFS: Error populating slow mem device information");
+        pr_err("TieredMMFS: Error populating slow mem device information");
         kfree(sbi);
         return ret;
     }
 
-    inode = fomtierfs_get_inode(sb, NULL, S_IFDIR | 0777, 0);
+    inode = tieredmmfs_get_inode(sb, NULL, S_IFDIR | 0777, 0);
     sb->s_root = d_make_root(inode);
     if (!sb->s_root) {
         kfree(sbi);
@@ -1214,9 +1214,9 @@ static int fomtierfs_fill_super(struct super_block *sb, struct fs_context *fc)
     }
 
     // Start the page migration thread
-    sbi->demote_task = kthread_create(fomtierfs_demote_task, sbi, "FTFS Demote Thread");
+    sbi->demote_task = kthread_create(tieredmmfs_demote_task, sbi, "TMMFS Demote Thread");
     if (!sbi->demote_task) {
-        pr_err("FOMTierFS: Failed to create the migration task");
+        pr_err("TieredMMFS: Failed to create the migration task");
         kfree(sbi);
         return -ENOMEM;
     }
@@ -1233,43 +1233,43 @@ static int fomtierfs_fill_super(struct super_block *sb, struct fs_context *fc)
     return 0;
 }
 
-static int fomtierfs_get_tree(struct fs_context *fc)
+static int tieredmmfs_get_tree(struct fs_context *fc)
 {
-    return get_tree_bdev(fc, fomtierfs_fill_super);
+    return get_tree_bdev(fc, tieredmmfs_fill_super);
 }
 
-static void fomtierfs_free_fc(struct fs_context *fc)
+static void tieredmmfs_free_fc(struct fs_context *fc)
 {
-    struct fomtierfs_context_info *fc_info = (struct fomtierfs_context_info*)fc->fs_private;
+    struct tieredmmfs_context_info *fc_info = (struct tieredmmfs_context_info*)fc->fs_private;
     kfree(fc_info->slow_dev_name);
     kfree(fc_info);
 }
 
-static const struct fs_context_operations fomtierfs_context_ops = {
-	.free		= fomtierfs_free_fc,
-	.parse_param	= fomtierfs_parse_param,
-	.get_tree	= fomtierfs_get_tree,
+static const struct fs_context_operations tieredmmfs_context_ops = {
+	.free		= tieredmmfs_free_fc,
+	.parse_param	= tieredmmfs_parse_param,
+	.get_tree	= tieredmmfs_get_tree,
 };
 
-int fomtierfs_init_fs_context(struct fs_context *fc)
+int tieredmmfs_init_fs_context(struct fs_context *fc)
 {
-    fc->ops = &fomtierfs_context_ops;
+    fc->ops = &tieredmmfs_context_ops;
     // Zeroing sets fc_info->base_pages to false by default
-    fc->fs_private = kzalloc(sizeof(struct fomtierfs_context_info), GFP_KERNEL);
+    fc->fs_private = kzalloc(sizeof(struct tieredmmfs_context_info), GFP_KERNEL);
     return 0;
 }
 
-static void fomtierfs_kill_sb(struct super_block *sb)
+static void tieredmmfs_kill_sb(struct super_block *sb)
 {
     kill_litter_super(sb);
 }
 
-static struct file_system_type fomtierfs_fs_type = {
+static struct file_system_type tieredmmfs_fs_type = {
     .owner = THIS_MODULE,
-    .name = "FOMTierFS",
-    .init_fs_context = fomtierfs_init_fs_context,
-    .parameters = fomtierfs_fs_parameters,
-    .kill_sb = fomtierfs_kill_sb,
+    .name = "TieredMMFS",
+    .init_fs_context = tieredmmfs_init_fs_context,
+    .parameters = tieredmmfs_fs_parameters,
+    .kill_sb = tieredmmfs_kill_sb,
     .fs_flags = FS_USERNS_MOUNT | FS_REQUIRES_DEV,
 };
 
@@ -1313,9 +1313,9 @@ static ssize_t active_list_show(struct kobject *kobj,
         struct kobj_attribute *attr, char *buf)
 {
     ssize_t count = 0;
-    struct fomtierfs_dev_info *fast_dev;
-    struct fomtierfs_dev_info *slow_dev;
-    struct fomtierfs_page *page;
+    struct tieredmmfs_dev_info *fast_dev;
+    struct tieredmmfs_dev_info *slow_dev;
+    struct tieredmmfs_page *page;
 
     if (!sysfs_sb_info) {
         return sprintf(buf, "Not mounted");
@@ -1406,7 +1406,7 @@ static ssize_t migrate_task_int_store(struct kobject *kobj,
 static struct kobj_attribute migrate_task_int_attr =
 __ATTR(migrate_task_int, 0644, migrate_task_int_show, migrate_task_int_store);
 
-static struct attribute *fomtierfs_attr[] = {
+static struct attribute *tieredmmfs_attr[] = {
     &usage_attr.attr,
     &active_list_attr.attr,
     &demotion_watermark_attr.attr,
@@ -1414,28 +1414,28 @@ static struct attribute *fomtierfs_attr[] = {
     NULL,
 };
 
-static const struct attribute_group fomtierfs_attr_group = {
-    .attrs = fomtierfs_attr,
+static const struct attribute_group tieredmmfs_attr_group = {
+    .attrs = tieredmmfs_attr,
 };
 
 int __init init_module(void)
 {
-    struct kobject *fomtierfs_kobj;
+    struct kobject *tieredmmfs_kobj;
     int err;
 
-    printk(KERN_INFO "Starting FOMTierFS");
-    register_filesystem(&fomtierfs_fs_type);
+    printk(KERN_INFO "Starting TieredMMFS");
+    register_filesystem(&tieredmmfs_fs_type);
 
-    fomtierfs_kobj = kobject_create_and_add("fomtierfs", fs_kobj);
-    if (unlikely(!fomtierfs_kobj)) {
-        pr_err("Failed to create fomtierfs kobj\n");
+    tieredmmfs_kobj = kobject_create_and_add("tieredmmfs", fs_kobj);
+    if (unlikely(!tieredmmfs_kobj)) {
+        pr_err("Failed to create tieredmmfs kobj\n");
         return -ENOMEM;
     }
 
-    err = sysfs_create_group(fomtierfs_kobj, &fomtierfs_attr_group);
+    err = sysfs_create_group(tieredmmfs_kobj, &tieredmmfs_attr_group);
     if (err) {
-        pr_err("Failed to register fomtierfs group\n");
-        kobject_put(fomtierfs_kobj);
+        pr_err("Failed to register tieredmmfs group\n");
+        kobject_put(tieredmmfs_kobj);
         return err;
     }
     return 0;
@@ -1443,8 +1443,8 @@ int __init init_module(void)
 
 void cleanup_module(void)
 {
-    printk(KERN_ERR "Removing FOMTierFS");
-    unregister_filesystem(&fomtierfs_fs_type);
+    printk(KERN_ERR "Removing TieredMMFS");
+    unregister_filesystem(&tieredmmfs_fs_type);
 }
 
 MODULE_LICENSE("GPL");

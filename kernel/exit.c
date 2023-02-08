@@ -68,7 +68,7 @@
 #include <linux/kprobes.h>
 #include <linux/rethook.h>
 #include <linux/sysfs.h>
-#include <linux/file_only_mem.h>
+#include <linux/file_based_mm.h>
 
 #include <linux/uaccess.h>
 #include <asm/unistd.h>
@@ -815,7 +815,7 @@ void __noreturn do_exit(long code)
 	// Bijan: When a process exits, check if we should delete its FOM files
 	// We only care if the main thread exits, so check against tsk->pid
 	// instead of tsk->tgid
-	fom_check_exiting_proc(tsk->pid);
+	fbmm_check_exiting_proc(tsk->pid);
 
 	kcov_task_exit(tsk);
 	kmsan_task_exit(tsk);

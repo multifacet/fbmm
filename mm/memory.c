@@ -2235,7 +2235,7 @@ static bool vm_mixed_ok(struct vm_area_struct *vma, pfn_t pfn)
 	return false;
 }
 
-extern int fom_track_pfn_insert;
+extern int fbmm_track_pfn_insert;
 static vm_fault_t __vm_insert_mixed(struct vm_area_struct *vma,
 		unsigned long addr, pfn_t pfn, pgprot_t pgprot,
 		bool mkwrite)
@@ -2247,7 +2247,7 @@ static vm_fault_t __vm_insert_mixed(struct vm_area_struct *vma,
 	if (addr < vma->vm_start || addr >= vma->vm_end)
 		return VM_FAULT_SIGBUS;
 
-	if (fom_track_pfn_insert) {
+	if (fbmm_track_pfn_insert) {
 		track_pfn_insert(vma, &pgprot, pfn);
 	}
 

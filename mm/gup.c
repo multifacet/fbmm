@@ -21,7 +21,7 @@
 
 #include <asm/mmu_context.h>
 #include <asm/tlbflush.h>
-#include <linux/file_only_mem.h>
+#include <linux/file_based_mm.h>
 
 #include "internal.h"
 
@@ -644,7 +644,7 @@ no_page:
 	return no_page_table(vma, flags);
 }
 
-extern int fom_follow_page_mask_fix;
+extern int fbmm_follow_page_mask_fix;
 static struct page *follow_pmd_mask(struct vm_area_struct *vma,
 				    unsigned long address, pud_t *pudp,
 				    unsigned int flags,
@@ -670,7 +670,7 @@ static struct page *follow_pmd_mask(struct vm_area_struct *vma,
 		page = follow_devmap_pmd(vma, address, pmd, flags, &ctx->pgmap);
 		spin_unlock(ptl);
 		if (page) {
-			if ((pmd_val(pmdval) & _PAGE_PSE) && fom_follow_page_mask_fix)
+			if ((pmd_val(pmdval) & _PAGE_PSE) && fbmm_follow_page_mask_fix)
 				ctx->page_mask = HPAGE_PMD_NR - 1;
 			return page;
 		}
@@ -1517,7 +1517,7 @@ long populate_vma_page_range(struct vm_area_struct *vma,
 	if ((vma->vm_flags & (VM_WRITE | VM_SHARED)) == VM_WRITE)
 		gup_flags |= FOLL_WRITE;
     /* We DO want to dirty writeable pages if they aare for FOM though */
-	else if ((vma->vm_flags & VM_WRITE) && use_file_only_mem(current->tgid)) {
+	else if ((vma->vm_flags & VM_WRITE) && use_file_based_mm(current->tgid)) {
 		gup_flags |= FOLL_WRITE;
 	}
 

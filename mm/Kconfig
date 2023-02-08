@@ -374,11 +374,11 @@ config MMAP_ALLOW_UNINITIALIZED
 
 	  See Documentation/admin-guide/mm/nommu-mmap.rst for more information.
 
-config FILE_ONLY_MEM
-	bool "File Only Memory"
+config FILE_BASED_MM
+	bool "File Based Memory Management"
 	depends on FS_DAX
 	help
-	  This option enables file only memory
+	  This option enables file based memory management
 
 config SELECT_MEMORY_MODEL
 	def_bool y

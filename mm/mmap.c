@@ -51,7 +51,7 @@
 #include <asm/cacheflush.h>
 #include <asm/tlb.h>
 #include <asm/mmu_context.h>
-#include <linux/file_only_mem.h>
+#include <linux/file_based_mm.h>
 
 #define CREATE_TRACE_POINTS
 #include <trace/events/mmap.h>
@@ -259,15 +259,15 @@ SYSCALL_DEFINE1(brk, unsigned long, brk)
 		goto out;
 
 	/* Ok, looks good - let it rip. */
-	if (use_file_only_mem(current->tgid)) {
+	if (use_file_based_mm(current->tgid)) {
 		vm_flags_t vm_flags;
 		unsigned long prot = PROT_READ | PROT_WRITE;
-		struct file *f = fom_create_new_file(newbrk-oldbrk, prot, 0);
+		struct file *f = fbmm_create_new_file(newbrk-oldbrk, prot, 0);
 
 		vm_flags = VM_DATA_DEFAULT_FLAGS | VM_ACCOUNT | mm->def_flags
 			| VM_SHARED | VM_MAYSHARE;
 		mmap_region(f, oldbrk, newbrk-oldbrk, vm_flags, 0, NULL);
-		fom_register_file(current->tgid, f, oldbrk, newbrk-oldbrk);
+		fbmm_register_file(current->tgid, f, oldbrk, newbrk-oldbrk);
 	} else {
 		brkvma = mas_prev(&mas, mm->start_brk);
 		if (do_brk_flags(&mas, brkvma, oldbrk, newbrk-oldbrk, 0) < 0)
@@ -1255,7 +1255,7 @@ unsigned long do_mmap(struct file *file, unsigned long addr,
 	struct mm_struct *mm = current->mm;
 	vm_flags_t vm_flags;
 	int pkey = 0;
-	bool created_fom_file = false;
+	bool created_fbmm_file = false;
 
 	validate_mm(mm);
 	*populate = 0;
@@ -1294,11 +1294,11 @@ unsigned long do_mmap(struct file *file, unsigned long addr,
 		return -ENOMEM;
 
 	// See if we want to use file only memory
-	if (!file && (flags & MAP_ANONYMOUS) && use_file_only_mem(current->tgid)) {
-		file = fom_create_new_file(len, prot, flags);
+	if (!file && (flags & MAP_ANONYMOUS) && use_file_based_mm(current->tgid)) {
+		file = fbmm_create_new_file(len, prot, flags);
 
 		if (file) {
-			created_fom_file = true;
+			created_fbmm_file = true;
 			flags = flags & ~MAP_ANONYMOUS;
 
 			// If the caller used MAP_PRIVATE, switch it to MAP_SHARED so that
@@ -1444,11 +1444,11 @@ unsigned long do_mmap(struct file *file, unsigned long addr,
 		*populate = len;
 
 	// Because mmap_region will unmap regions that overlap with the new region,
-	// we must wait to register the new fom file until after it is finished.
-	// This is to prevent a fom file from being registered and then an overlapping
+	// we must wait to register the new fbmm file until after it is finished.
+	// This is to prevent a fbmm file from being registered and then an overlapping
 	// region is unmapped, making the fom system think it needs to delete the new file
-	if (created_fom_file) {
-		fom_register_file(current->tgid, file, addr, len);
+	if (created_fbmm_file) {
+		fbmm_register_file(current->tgid, file, addr, len);
 	}
 	return addr;
 }
@@ -2484,7 +2484,7 @@ do_mas_align_munmap(struct ma_state *mas, struct vm_area_struct *vma,
 	remove_mt(mm, &mas_detach);
 	__mt_destroy(&mt_detach);
 
-	fom_munmap(current->tgid, start, end - start);
+	fbmm_munmap(current->tgid, start, end - start);
 
 	validate_mm(mm);
 	return downgrade ? 1 : 0;
