@@ -166,9 +166,7 @@ static int truncate_fbmm_file(struct file *f, unsigned long len, int flags) {
 			error = vfs_fallocate(f, 0, 0, len);
 	} else {
 		sb_start_write(inode->i_sb);
-		error = locks_verify_truncate(inode, f, len);
-		if (!error)
-			error = security_path_truncate(&f->f_path);
+		error = security_path_truncate(&f->f_path);
 		if (!error)
 			error = do_truncate(file_mnt_user_ns(f), dentry, len,
 					    ATTR_MTIME | ATTR_CTIME, f);
