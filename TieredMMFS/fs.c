@@ -888,8 +888,7 @@ const struct inode_operations tieredmmfs_file_inode_operations = {
 
 const struct address_space_operations tieredmmfs_aops = {
     .direct_IO = noop_direct_IO,
-    .set_page_dirty = __set_page_dirty_no_writeback,
-    .invalidatepage = noop_invalidatepage,
+    .dirty_folio = noop_dirty_folio,
 };
 
 struct inode *tieredmmfs_get_inode(struct super_block *sb,
@@ -970,14 +969,14 @@ static int tieredmmfs_symlink(struct user_namespace *mnt_userns, struct inode *d
 }
 
 static int tieredmmfs_tmpfile(struct user_namespace *mnt_userns,
-            struct inode *dir, struct dentry *dentry, umode_t mode)
+            struct inode *dir, struct file *file, umode_t mode)
 {
     struct inode *inode;
 
     inode = tieredmmfs_get_inode(dir->i_sb, dir, mode, 0);
     if (!inode)
         return -ENOSPC;
-    d_tmpfile(dentry, inode);
+    d_tmpfile(file, inode);
     return 0;
 }
 
@@ -1110,13 +1109,15 @@ static int tieredmmfs_populate_dev_info(struct tieredmmfs_sb_info *sbi, struct b
     // We want to work with pages of the size sbi->page_size, so calcualate
     // this ratio to convert between them.
     unsigned long page_size_ratio = sbi->page_size / PAGE_SIZE;
+    // Not used, but required for fs_dax_get_by_bdev
+    u64 start_off;
 
     di->bdev = bdev;
-    di->daxdev = fs_dax_get_by_bdev(bdev);
+    di->daxdev = fs_dax_get_by_bdev(bdev, &start_off, NULL, NULL);
 
     // Determine how many pages are in the device
     num_base_pages = dax_direct_access(di->daxdev, 0, LONG_MAX / PAGE_SIZE,
-                    &di->virt_addr, &di->pfn);
+                    DAX_ACCESS, &di->virt_addr, &di->pfn);
     if (num_base_pages <= 0) {
         pr_err("TieredMMFS: Determining device size failed");
         return -EIO;
