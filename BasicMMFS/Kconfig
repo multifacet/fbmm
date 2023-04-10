@@ -1,0 +1,3 @@
+config BASICMMFS
+    tristate "Adds the BasicMMFS"
+    default m
