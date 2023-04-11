@@ -977,7 +977,7 @@ static int tieredmmfs_tmpfile(struct user_namespace *mnt_userns,
     if (!inode)
         return -ENOSPC;
     d_tmpfile(file, inode);
-    return 0;
+    return finish_open_simple(file, 0);
 }
 
 static const struct inode_operations tieredmmfs_dir_inode_operations = {
@@ -1111,13 +1111,16 @@ static int tieredmmfs_populate_dev_info(struct tieredmmfs_sb_info *sbi, struct b
     unsigned long page_size_ratio = sbi->page_size / PAGE_SIZE;
     // Not used, but required for fs_dax_get_by_bdev
     u64 start_off;
+    int dax_lock_id;
 
     di->bdev = bdev;
     di->daxdev = fs_dax_get_by_bdev(bdev, &start_off, NULL, NULL);
 
     // Determine how many pages are in the device
+    dax_lock_id = dax_read_lock();
     num_base_pages = dax_direct_access(di->daxdev, 0, LONG_MAX / PAGE_SIZE,
                     DAX_ACCESS, &di->virt_addr, &di->pfn);
+    dax_read_unlock(dax_lock_id);
     if (num_base_pages <= 0) {
         pr_err("TieredMMFS: Determining device size failed");
         return -EIO;
