@@ -427,6 +427,7 @@ int __pte_alloc(struct mm_struct *mm, pmd_t *pmd)
 		pte_free(mm, new);
 	return 0;
 }
+EXPORT_SYMBOL_GPL(__pte_alloc);
 
 int __pte_alloc_kernel(pmd_t *pmd)
 {

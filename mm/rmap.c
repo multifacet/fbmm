@@ -1369,6 +1369,7 @@ void page_add_file_rmap(struct page *page,
 
 	mlock_vma_page(page, vma, compound);
 }
+EXPORT_SYMBOL_GPL(page_add_file_rmap);
 
 /**
  * page_remove_rmap - take down pte mapping from a page

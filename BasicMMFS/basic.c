@@ -7,6 +7,9 @@
 #include <linux/pagemap.h>
 #include <linux/statfs.h>
 #include <linux/module.h>
+#include <linux/rmap.h>
+#include <linux/string.h>
+#include <linux/falloc.h>
 
 #include "basic.h"
 
@@ -23,9 +26,139 @@ struct basicmmfs_inode_info *BMMFS_I(struct inode *inode)
     return inode->i_private;
 }
 
+// Allocate a base page and assign it to the inode at the given page offset
+// Takes the sbi->lock.
+// Returns the allocated page if there is one, else NULL
+struct page *basicmmfs_alloc_page(struct basicmmfs_inode_info *inode_info, struct basicmmfs_sb_info *sbi,
+        u64 page_offset)
+{
+    u8 *kaddr;
+    struct page *page = NULL;
+
+    spin_lock(&sbi->lock);
+
+    // First, do we have any free pages available?
+    if (sbi->free_pages == 0) {
+        // TODO: when swapping is added, add a mechanism to get more pages if
+        // we have fewer total pages than the max allowed
+        goto unlock;
+    }
+
+    // Take a page from the free list
+    page = list_first_entry(&sbi->free_list, struct page, lru);
+    list_del(&page->lru);
+    sbi->free_pages--;
+    get_page(page);
+
+    // Clear the page outside of the critical section
+    spin_unlock(&sbi->lock);
+
+    kaddr = kmap(page);
+    memset(kaddr, 0, PAGE_SIZE);
+    kunmap(page);
+
+    spin_lock(&sbi->lock);
+
+    // Add the page to the active list
+    list_add(&page->lru, &sbi->active_list);
+
+    mtree_store(&inode_info->mt, page_offset, page, GFP_KERNEL);
+
+unlock:
+    spin_unlock(&sbi->lock);
+    return page;
+}
+
+void basicmmfs_return_page(struct page *page, struct basicmmfs_sb_info *sbi)
+{
+    spin_lock(&sbi->lock);
+
+    list_del(&page->lru);
+    put_page(page);
+
+    // Add the page back to the free list
+    list_add_tail(&page->lru, &sbi->active_list);
+    sbi->free_pages++;
+
+    spin_unlock(&sbi->lock);
+}
+
+void basicmmfs_free_range(struct inode *inode, loff_t offset, loff_t len)
+{
+    struct basicmmfs_sb_info *sbi = BMMFS_SB(inode->i_sb);
+    struct basicmmfs_inode_info *inode_info = BMMFS_I(inode);
+    struct page *page;
+    u64 page_offset = offset >> PAGE_SHIFT;
+    u64 num_pages = len >> PAGE_SHIFT;
+
+    for (int i = page_offset; i < page_offset + num_pages; i++) {
+        page = mtree_erase(&inode_info->mt, i);
+        // Check if something actually existed at this index
+        if (!page)
+            continue;
+
+        basicmmfs_return_page(page, sbi);
+    }
+}
+
 static vm_fault_t basicmmfs_fault(struct vm_fault *vmf)
 {
-    return VM_FAULT_OOM;
+    struct vm_area_struct *vma = vmf->vma;
+    struct inode *inode = vma->vm_file->f_inode;
+    struct basicmmfs_inode_info *inode_info;
+    struct basicmmfs_sb_info *sbi;
+    struct page *page;
+    vm_fault_t ret = 0;
+    pte_t entry;
+
+    inode_info = BMMFS_I(inode);
+    sbi = BMMFS_SB(inode->i_sb);
+
+    // Get the page if it already allocated
+    page = mtree_load(&inode_info->mt, vmf->pgoff);
+
+    // For now, do nothing if the pte already exists.
+    // TODO: I'm not sure if this is right...
+    if (vmf->pte) {
+        vmf->page = page;
+        return 0;
+    }
+
+    if (pte_alloc(vma->vm_mm, vmf->pmd))
+        return VM_FAULT_OOM;
+
+    vmf->pte = pte_offset_map_lock(vma->vm_mm, vmf->pmd, vmf->address, &vmf->ptl);
+    if (!pte_none(*vmf->pte)) {
+        goto unlock;
+    }
+
+    // Try to allocate the page if it hasn't been already (e.g. from fallocate)
+    if (!page) {
+        page = basicmmfs_alloc_page(inode_info, sbi, vmf->pgoff);
+        if (!page) {
+            ret = VM_FAULT_OOM;
+            goto unlock;
+        }
+    }
+
+
+    // Construct the pte entry
+    entry = mk_pte(page, vma->vm_page_prot);
+    entry = pte_mkyoung(entry);
+    if (vma->vm_flags & VM_WRITE) {
+        entry = pte_mkwrite(pte_mkdirty(entry));
+    }
+
+    page_add_file_rmap(page, vma, false);
+    set_pte_at(vma->vm_mm, vmf->address, vmf->pte, entry);
+
+    // No need to invalidate - it was non-present before
+    update_mmu_cache(vma, vmf->address, vmf->pte);
+    vmf->page = page;
+
+unlock:
+    pte_unmap_unlock(vmf->pte, vmf->ptl);
+    return ret;
 }
 
 static struct vm_operations_struct basicmmfs_vm_ops = {
@@ -45,7 +178,28 @@ static int basicmmfs_mmap(struct file *file, struct vm_area_struct *vma)
 
 static long basicmmfs_fallocate(struct file *file, int mode, loff_t offset, loff_t len)
 {
-    return -EOPNOTSUPP;
+    struct inode *inode = file_inode(file);
+    struct basicmmfs_sb_info *sbi = BMMFS_SB(inode->i_sb);
+    struct basicmmfs_inode_info *inode_info = BMMFS_I(inode);
+    struct page *page;
+    loff_t off;
+
+    if (mode & FALLOC_FL_PUNCH_HOLE) {
+        basicmmfs_free_range(inode, offset, len);
+        return 0;
+    } else if (mode != 0) {
+        return -EOPNOTSUPP;
+    }
+
+    // Allocate and add mappings for the desired range
+    for (off = offset; off < offset + len; off += PAGE_SIZE) {
+        page = basicmmfs_alloc_page(inode_info, sbi, off >> PAGE_SHIFT);
+        if (!page) {
+            return -ENOMEM;
+        }
+    }
+
+    return 0;
 }
 
 const struct file_operations basicmmfs_file_operations = {
@@ -154,7 +308,7 @@ static int basicmmfs_tmpfile(struct user_namespace *mnt_userns,
     if (!inode)
         return -ENOSPC;
     d_tmpfile(file, inode);
-    return 0;
+    return finish_open_simple(file, 0);
 }
 
 static const struct inode_operations basicmmfs_dir_inode_operations = {
@@ -188,7 +342,14 @@ static int basicmmfs_statfs(struct dentry *dentry, struct kstatfs *buf)
 
 static void basicmmfs_free_inode(struct inode *inode)
 {
+    struct basicmmfs_sb_info *sbi = BMMFS_SB(inode->i_sb);
     struct basicmmfs_inode_info *inode_info = BMMFS_I(inode);
+    struct page *page;
+    unsigned long index = 0;
+
+    mt_for_each(&inode_info->mt, page, index, ULONG_MAX) {
+        basicmmfs_return_page(page, sbi);
+    }
 
     mtree_destroy(&inode_info->mt);
     kfree(inode_info);
@@ -220,11 +381,10 @@ static int basicmmfs_fill_super(struct super_block *sb, struct fs_context *fc)
     sb->s_magic = 0xDEADBEEF;
     sb->s_op = &basicmmfs_ops;
     sb->s_time_gran = 1;
-    if (!sb_set_blocksize(sb, PAGE_SIZE)) {
-        pr_err("BasicMMFS: error setting blocksize");
-        kfree(sbi);
-    }
+    sb->s_blocksize = PAGE_SIZE;
+    sb->s_blocksize_bits = PAGE_SHIFT;
 
+    spin_lock_init(&sbi->lock);
     INIT_LIST_HEAD(&sbi->free_list);
     INIT_LIST_HEAD(&sbi->active_list);
     // TODO: Get the number of pages to request from a mount arg
@@ -244,7 +404,7 @@ static int basicmmfs_fill_super(struct super_block *sb, struct fs_context *fc)
 
 static int basicmmfs_get_tree(struct fs_context *fc)
 {
-    return get_tree_bdev(fc, basicmmfs_fill_super);
+    return get_tree_nodev(fc, basicmmfs_fill_super);
 }
 
 enum basicmmfs_param {

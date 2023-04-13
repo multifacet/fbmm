@@ -8,6 +8,7 @@
 #include <linux/sched.h>
 
 struct basicmmfs_sb_info {
+    spinlock_t lock;
     struct list_head free_list;
     struct list_head active_list;
     u64 num_pages;
