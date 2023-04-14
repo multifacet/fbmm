@@ -74,7 +74,8 @@ void basicmmfs_return_page(struct page *page, struct basicmmfs_sb_info *sbi)
     spin_lock(&sbi->lock);
 
     list_del(&page->lru);
-    put_page(page);
+    // Don't need to put page here for being unmapped
+    // that seems to have been handled by the unmapping code?
 
     // Add the page back to the free list
     list_add_tail(&page->lru, &sbi->active_list);
@@ -155,6 +156,7 @@ static vm_fault_t basicmmfs_fault(struct vm_fault *vmf)
     // No need to invalidate - it was non-present before
     update_mmu_cache(vma, vmf->address, vmf->pte);
     vmf->page = page;
+    get_page(page);
 
 unlock:
     pte_unmap_unlock(vmf->pte, vmf->ptl);
@@ -371,6 +373,8 @@ static int basicmmfs_fill_super(struct super_block *sb, struct fs_context *fc)
 {
     struct inode *inode;
     struct basicmmfs_sb_info *sbi = kzalloc(sizeof(struct basicmmfs_sb_info), GFP_KERNEL);
+    u64 nr_pages = 128 * 1024;
+    u64 alloc_size = 1024;
 
     if (!sbi) {
         return -ENOMEM;
@@ -387,12 +391,17 @@ static int basicmmfs_fill_super(struct super_block *sb, struct fs_context *fc)
     spin_lock_init(&sbi->lock);
     INIT_LIST_HEAD(&sbi->free_list);
     INIT_LIST_HEAD(&sbi->active_list);
+    sbi->num_pages = 0;
     // TODO: Get the number of pages to request from a mount arg
     // Might need to be GFP_HIGHUSER?
-    sbi->num_pages = alloc_pages_bulk_list(GFP_USER, 1024, &sbi->free_list);
+    // TODO: Make this actually allocate nr_pages instead of the nearest multiple
+    // of alloc_size greater than nr_pages
+    for (int i = 0; i < nr_pages / alloc_size; i++) {
+        sbi->num_pages += alloc_pages_bulk_list(GFP_HIGHUSER, alloc_size, &sbi->free_list);
+    }
     sbi->free_pages = sbi->num_pages;
 
-    inode = basicmmfs_get_inode(sb, NULL, S_IFDIR | 0777, 0);
+    inode = basicmmfs_get_inode(sb, NULL, S_IFDIR | 0755, 0);
     sb->s_root = d_make_root(inode);
     if (!sb->s_root) {
         kfree(sbi);
@@ -439,6 +448,25 @@ int basicmmfs_init_fs_context(struct fs_context *fc)
 
 static void basicmmfs_kill_sb(struct super_block *sb)
 {
+    struct basicmmfs_sb_info *sbi = BMMFS_SB(sb);
+    struct page *page, *tmp;
+
+    // Is it necessary to lock here since this is happening when
+    // it's being unmounted.
+    // It probably doesn't hurt
+    spin_lock(&sbi->lock);
+
+    // Return the pages we took to the kernel.
+    // All the pages should be in the free list at this point
+    list_for_each_entry_safe(page, tmp, &sbi->free_list, lru) {
+        list_del(&page->lru);
+        put_page(page);
+    }
+
+    spin_unlock(&sbi->lock);
+
+    kfree(sbi);
+
     kill_litter_super(sb);
 }
 
