@@ -554,6 +554,9 @@ static ssize_t fbmm_dir_store(struct kobject *kobj,
 		return err;
 	}
 
+	// Free the reference to the path so we can unmount the fs
+	path_put(&p);
+
 	return count;
 }
 static struct kobj_attribute fbmm_file_dir_attribute =
