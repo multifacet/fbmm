@@ -10,6 +10,7 @@
 #include <linux/rmap.h>
 #include <linux/string.h>
 #include <linux/falloc.h>
+#include <linux/file_based_mm.h>
 
 #include "basic.h"
 
@@ -74,6 +75,8 @@ void basicmmfs_return_page(struct page *page, struct basicmmfs_sb_info *sbi)
     spin_lock(&sbi->lock);
 
     list_del(&page->lru);
+    page->mapping = NULL;
+    page->index = 0;
     // Don't need to put page here for being unmapped
     // that seems to have been handled by the unmapping code?
 
@@ -140,6 +143,8 @@ static vm_fault_t basicmmfs_fault(struct vm_fault *vmf)
             ret = VM_FAULT_OOM;
             goto unlock;
         }
+        page->mapping = vma->vm_file->f_mapping;
+        page->index = vmf->pgoff;
     }
 
 
@@ -362,11 +367,35 @@ static int basicmmfs_show_options(struct seq_file *m, struct dentry *root)
     return 0;
 }
 
+static void basicmmfs_swap_out(struct super_block *sb, int node_id, unsigned long nr_to_reclaim,
+            unsigned long *nr_scanned, unsigned long *nr_reclaimed)
+{
+    struct basicmmfs_sb_info *sbi = BMMFS_SB(sb);
+    struct page *page;
+    u64 i;
+
+    // First, see if we can give back some of our free pages
+    spin_lock(&sbi->lock);
+    for (i = 0; i < sbi->free_pages && i < nr_to_reclaim && i < 32; i++) {
+        page = list_first_entry(&sbi->free_list, struct page, lru);
+        list_del(&page->lru);
+        put_page(page);
+    }
+    sbi->free_pages -= i;
+    sbi->num_pages -= i;
+
+    spin_unlock(&sbi->lock);
+
+    nr_scanned += i;
+    nr_reclaimed += i;
+}
+
 static const struct super_operations basicmmfs_ops = {
     .statfs = basicmmfs_statfs,
     .free_inode = basicmmfs_free_inode,
     .drop_inode = generic_delete_inode,
     .show_options = basicmmfs_show_options,
+    .swap_mmfs = basicmmfs_swap_out,
 };
 
 static int basicmmfs_fill_super(struct super_block *sb, struct fs_context *fc)
@@ -375,6 +404,7 @@ static int basicmmfs_fill_super(struct super_block *sb, struct fs_context *fc)
     struct basicmmfs_sb_info *sbi = kzalloc(sizeof(struct basicmmfs_sb_info), GFP_KERNEL);
     u64 nr_pages = 128 * 1024;
     u64 alloc_size = 1024;
+    int err;
 
     if (!sbi) {
         return -ENOMEM;
@@ -400,6 +430,7 @@ static int basicmmfs_fill_super(struct super_block *sb, struct fs_context *fc)
         sbi->num_pages += alloc_pages_bulk_list(GFP_HIGHUSER, alloc_size, &sbi->free_list);
     }
     sbi->free_pages = sbi->num_pages;
+    sbi->id = fbmm_get_mmfs_id();
 
     inode = basicmmfs_get_inode(sb, NULL, S_IFDIR | 0755, 0);
     sb->s_root = d_make_root(inode);
@@ -407,6 +438,25 @@ static int basicmmfs_fill_super(struct super_block *sb, struct fs_context *fc)
         kfree(sbi);
         return -ENOMEM;
     }
+
+    // Setup the sysfs interface
+    err = kobject_init_and_add(&sbi->kobj, &basicmmfs_kobj_ktype, fs_kobj,
+        "basicmmfs_%d", sbi->id);
+    if (err) {
+        pr_err("BasicMMFS: Failed to init kobject\n");
+        kobject_put(&sbi->kobj);
+        kfree(sbi);
+        return err;
+    }
+    err = sysfs_create_group(&sbi->kobj, &basicmmfs_attr_group);
+    if (err) {
+        pr_err("BasicMMFS: Failed to register attribute group\n");
+        kobject_put(&sbi->kobj);
+        kfree(sbi);
+        return err;
+    }
+
+    fbmm_register_mmfs(sb, "BasicMMFS", sbi->id);
 
     return 0;
 }
@@ -450,6 +500,8 @@ static void basicmmfs_kill_sb(struct super_block *sb)
 {
     struct basicmmfs_sb_info *sbi = BMMFS_SB(sb);
     struct page *page, *tmp;
+
+    fbmm_unregister_mmfs(sb);
 
     // Is it necessary to lock here since this is happening when
     // it's being unmounted.

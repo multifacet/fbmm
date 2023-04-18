@@ -2253,6 +2253,8 @@ struct super_operations {
 				  struct shrink_control *);
 	long (*free_cached_objects)(struct super_block *,
 				    struct shrink_control *);
+	void (*swap_mmfs)(struct super_block *, int node_id, unsigned long nr_to_reclaim,
+					unsigned long *nr_scanned, unsigned long *nr_reclaimed);
 };
 
 /*

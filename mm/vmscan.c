@@ -55,6 +55,7 @@
 #include <linux/ctype.h>
 #include <linux/debugfs.h>
 #include <linux/khugepaged.h>
+#include <linux/file_based_mm.h>
 
 #include <asm/tlbflush.h>
 #include <asm/div64.h>
@@ -6102,6 +6103,8 @@ static void shrink_node_memcgs(pg_data_t *pgdat, struct scan_control *sc)
 {
 	struct mem_cgroup *target_memcg = sc->target_mem_cgroup;
 	struct mem_cgroup *memcg;
+
+	fbmm_shrink_mmfs(pgdat->node_id, sc->nr_to_reclaim, &sc->nr_scanned, &sc->nr_reclaimed);
 
 	memcg = mem_cgroup_iter(target_memcg, NULL, NULL);
 	do {

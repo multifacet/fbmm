@@ -1,5 +1,5 @@
 obj-m += basicmmfs.o
-basicmmfs-y += basic.o
+basicmmfs-y += basic.o basic_sysfs.o
 
 all:
 	make -C ../kbuild M=$(PWD) modules

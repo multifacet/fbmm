@@ -6,6 +6,7 @@
 #include <linux/maple_tree.h>
 #include <linux/spinlock.h>
 #include <linux/sched.h>
+#include <linux/kobject.h>
 
 struct basicmmfs_sb_info {
     spinlock_t lock;
@@ -13,6 +14,8 @@ struct basicmmfs_sb_info {
     struct list_head active_list;
     u64 num_pages;
     u64 free_pages;
+    int id;
+    struct kobject kobj;
 };
 
 struct basicmmfs_inode_info {
@@ -20,4 +23,6 @@ struct basicmmfs_inode_info {
     struct maple_tree mt;
 };
 
+extern const struct attribute_group basicmmfs_attr_group;
+extern const struct kobj_type basicmmfs_kobj_ktype;
 #endif //BASIC_MMFS_H

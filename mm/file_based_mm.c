@@ -38,12 +38,20 @@ struct fbmm_proc {
 	struct rb_node node;
 };
 
+struct fbmm_mmfs {
+	struct list_head list;
+	struct super_block *sb;
+	char *name;
+	int id;
+};
 
 static enum file_based_mm_state fbmm_state = FBMM_OFF;
 static pid_t cur_proc = 0;
 static char file_dir[PATH_MAX];
 static struct rb_root fbmm_procs = RB_ROOT;
 static DECLARE_RWSEM(fbmm_procs_sem);
+static LIST_HEAD(mmfs_list);
+static atomic_t mmfs_id_counter = ATOMIC_INIT(0);
 
 static ktime_t file_create_time = 0;
 static u64 num_file_creates = 0;
@@ -201,6 +209,53 @@ bool use_file_based_mm(pid_t pid) {
 	// Should never reach here
 	return false;
 }
+
+int fbmm_register_mmfs(struct super_block *sb, char *name, int id) {
+	struct fbmm_mmfs *mmfs = kzalloc(sizeof(struct fbmm_mmfs), GFP_KERNEL);
+	// +1 for the null terminator
+	size_t name_len = strlen(name) + 1;
+
+	if (!mmfs) {
+		goto err;
+	}
+
+	INIT_LIST_HEAD(&mmfs->list);
+	mmfs->sb = sb;
+	mmfs->name = kzalloc(name_len, GFP_KERNEL);
+	if (!mmfs->name) {
+		kfree(mmfs);
+		goto err;
+	}
+	strlcpy(mmfs->name, name, name_len);
+	mmfs->id = id;
+
+	list_add_tail(&mmfs->list, &mmfs_list);
+
+	return 0;
+err:
+	pr_err("FBMM: Failed to register MMFS %s\n", name);
+	return -ENOMEM;
+}
+EXPORT_SYMBOL(fbmm_register_mmfs);
+
+void fbmm_unregister_mmfs(struct super_block *sb) {
+	struct fbmm_mmfs *mmfs, *tmp;
+
+	list_for_each_entry_safe(mmfs, tmp, &mmfs_list, list) {
+		if (mmfs->sb == sb) {
+			list_del(&mmfs->list);
+			kfree(mmfs->name);
+			kfree(mmfs);
+			return;
+		}
+	}
+}
+EXPORT_SYMBOL(fbmm_unregister_mmfs);
+
+int fbmm_get_mmfs_id() {
+	return atomic_inc_return(&mmfs_id_counter);
+}
+EXPORT_SYMBOL(fbmm_get_mmfs_id);
 
 struct file *fbmm_create_new_file(unsigned long len, unsigned long prot, int flags) {
 	struct file *f;
@@ -461,6 +516,21 @@ void fbmm_check_exiting_proc(pid_t pid) {
 	vfree(proc);
 
 	up_write(&fbmm_procs_sem);
+}
+
+void fbmm_shrink_mmfs(int node_id, unsigned long nr_to_reclaim,
+		unsigned long *nr_scanned, unsigned long *nr_reclaimed) {
+	struct fbmm_mmfs *mmfs;
+	struct super_block *sb;
+
+	pr_err("FBMM: Shrinking mmfs\n");
+	list_for_each_entry(mmfs, &mmfs_list, list) {
+		sb = mmfs->sb;
+
+		if (sb->s_op->swap_mmfs) {
+			sb->s_op->swap_mmfs(sb, node_id, nr_to_reclaim, nr_scanned, nr_reclaimed);
+		}
+	}
 }
 
 ///////////////////////////////////////////////////////////////////////////////

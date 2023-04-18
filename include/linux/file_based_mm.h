@@ -6,13 +6,20 @@
 
 #ifdef CONFIG_FILE_BASED_MM
 
-bool use_file_based_mm(pid_t pid);
+// Used by MMFSs
+int fbmm_register_mmfs(struct super_block *sb, char *name, int id);
+void fbmm_unregister_mmfs(struct super_block *sb);
+int fbmm_get_mmfs_id(void);
 
+// Used internally by kernel
+bool use_file_based_mm(pid_t pid);
 struct file *fbmm_create_new_file(unsigned long len, unsigned long prot, int flags);
 void fbmm_register_file(pid_t pid, struct file *f, unsigned long start,
 		unsigned long len);
 int fbmm_munmap(pid_t pid, unsigned long start, unsigned long len);
 void fbmm_check_exiting_proc(pid_t pid);
+void fbmm_shrink_mmfs(int node_id, unsigned long nr_to_reclaim,
+		unsigned long *nr_scanned, unsigned long *nr_reclaimed);
 
 #else //CONFIG_FILE_BASED_MM
 
@@ -33,6 +40,10 @@ inline int fbmm_munmap(pid_t pid, unsigned long start, unsigned long len) {
 }
 
 inline void fbmm_check_exiting_proc(pid_t pid) {}
+
+void fbmm_shrink_mmfs(int node_id, unsigned long nr_to_reclaim,
+		unsigned long *nr_scanned, unsigned long *nr_reclaimed)
+{}
 
 #endif //CONFIG_FILE_BASED_MM
 
