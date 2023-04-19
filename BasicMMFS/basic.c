@@ -35,14 +35,26 @@ struct page *basicmmfs_alloc_page(struct basicmmfs_inode_info *inode_info, struc
 {
     u8 *kaddr;
     struct page *page = NULL;
+    u64 pages_to_alloc = 4096;
+    u64 pages_alloced;
 
     spin_lock(&sbi->lock);
 
     // First, do we have any free pages available?
     if (sbi->free_pages == 0) {
-        // TODO: when swapping is added, add a mechanism to get more pages if
-        // we have fewer total pages than the max allowed
-        goto unlock;
+        // If the number of pages we have is less than the max allowed, alloc more
+        if (sbi->num_pages < sbi->max_pages) {
+            pages_to_alloc = min(pages_to_alloc, sbi->max_pages - sbi->num_pages);
+            pages_alloced = alloc_pages_bulk_list(GFP_HIGHUSER, pages_to_alloc, &sbi->free_list);
+
+            sbi->num_pages += pages_alloced;
+            sbi->free_pages += pages_alloced;
+        }
+
+        // If we still have no free pages, we can't do anything
+        if (sbi->free_pages == 0) {
+            goto unlock;
+        }
     }
 
     // Take a page from the free list
@@ -421,12 +433,13 @@ static int basicmmfs_fill_super(struct super_block *sb, struct fs_context *fc)
     spin_lock_init(&sbi->lock);
     INIT_LIST_HEAD(&sbi->free_list);
     INIT_LIST_HEAD(&sbi->active_list);
+    sbi->max_pages = nr_pages;
     sbi->num_pages = 0;
     // TODO: Get the number of pages to request from a mount arg
     // Might need to be GFP_HIGHUSER?
     // TODO: Make this actually allocate nr_pages instead of the nearest multiple
     // of alloc_size greater than nr_pages
-    for (int i = 0; i < nr_pages / alloc_size; i++) {
+    for (int i = 0; i < sbi->max_pages / alloc_size; i++) {
         sbi->num_pages += alloc_pages_bulk_list(GFP_HIGHUSER, alloc_size, &sbi->free_list);
     }
     sbi->free_pages = sbi->num_pages;
