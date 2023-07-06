@@ -6,6 +6,8 @@
 
 #ifdef CONFIG_FILE_BASED_MM
 
+extern const struct file_operations proc_fbmm_mnt_dir;
+
 bool use_file_based_mm(pid_t pid);
 
 struct file *fbmm_create_new_file(unsigned long len, unsigned long prot, int flags);

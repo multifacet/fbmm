@@ -9,10 +9,11 @@
 #include <linux/vmalloc.h>
 #include <linux/falloc.h>
 #include <linux/timekeeping.h>
+#include <linux/maple_tree.h>
 
 enum file_based_mm_state {
 	FBMM_OFF = 0,
-	FBMM_SINGLE_PROC = 1,
+	FBMM_SELECTED_PROCS = 1,
 	FBMM_ALL = 2
 };
 
@@ -34,16 +35,16 @@ struct fbmm_mapping {
 struct fbmm_proc {
 	pid_t pid;
 	struct rb_root mappings;
-
 	struct rb_node node;
 };
 
 
 static enum file_based_mm_state fbmm_state = FBMM_OFF;
-static pid_t cur_proc = 0;
-static char file_dir[PATH_MAX];
 static struct rb_root fbmm_procs = RB_ROOT;
 static DECLARE_RWSEM(fbmm_procs_sem);
+// This is used to store the default fbmm mount directories for each proc.
+// An entry for a pid exists in this tree iff the process of that pid is using FBMM.
+static struct maple_tree fbmm_proc_mnt_dirs = MTREE_INIT(fbmm_proc_mnt_dirs, 0);
 
 static ktime_t file_create_time = 0;
 static u64 num_file_creates = 0;
@@ -192,8 +193,8 @@ static void drop_fbmm_file(struct fbmm_mapping *map) {
 bool use_file_based_mm(pid_t pid) {
 	if (fbmm_state == FBMM_OFF) {
 		return false;
-	} if (fbmm_state == FBMM_SINGLE_PROC) {
-		return pid == cur_proc;
+	} if (fbmm_state == FBMM_SELECTED_PROCS) {
+		return mtree_load(&fbmm_proc_mnt_dirs, pid) != NULL;
 	} else if (fbmm_state == FBMM_ALL) {
 		return true;
 	}
@@ -203,6 +204,7 @@ bool use_file_based_mm(pid_t pid) {
 }
 
 struct file *fbmm_create_new_file(unsigned long len, unsigned long prot, int flags) {
+    char *file_dir;
 	struct file *f;
 	int open_flags = O_EXCL | O_TMPFILE;
 	umode_t open_mode = 0;
@@ -223,6 +225,10 @@ struct file *fbmm_create_new_file(unsigned long len, unsigned long prot, int fla
 		// It doesn't make sense for anon memory to be read only,
 		return NULL;
 	}
+
+	file_dir = mtree_load(&fbmm_proc_mnt_dirs, current->tgid);
+	if (!file_dir)
+		return NULL;
 
 	f = filp_open(file_dir, open_flags, open_mode);
 	if (IS_ERR(f))
@@ -432,6 +438,7 @@ exit_locked:
 void fbmm_check_exiting_proc(pid_t pid) {
 	struct fbmm_proc *proc;
 	struct rb_node *node;
+	void *buf;
 
 	down_read(&fbmm_procs_sem);
 	proc = get_fbmm_proc(pid);
@@ -461,6 +468,11 @@ void fbmm_check_exiting_proc(pid_t pid) {
 	vfree(proc);
 
 	up_write(&fbmm_procs_sem);
+
+	// Also remove this proc from the proc_mnt_dirs maple tree
+	buf = mtree_erase(&fbmm_proc_mnt_dirs, pid);
+	if (buf)
+		vfree(buf);
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -493,74 +505,6 @@ static ssize_t fbmm_state_store(struct kobject *kobj,
 }
 static struct kobj_attribute fbmm_state_attribute =
 __ATTR(state, 0644, fbmm_state_show, fbmm_state_store);
-
-static ssize_t fbmm_pid_show(struct kobject *kobj,
-		struct kobj_attribute *attr, char *buf)
-{
-	return sprintf(buf, "%d\n", cur_proc);
-}
-
-static ssize_t fbmm_pid_store(struct kobject *kobj,
-		struct kobj_attribute *attr,
-		const char *buf, size_t count)
-{
-	pid_t pid;
-	int ret;
-
-	ret = kstrtoint(buf, 0, &pid);
-
-	if (ret != 0) {
-		cur_proc = 0;
-		return ret;
-	}
-
-	cur_proc = pid;
-
-	return count;
-}
-static struct kobj_attribute fbmm_pid_attribute =
-__ATTR(pid, 0644, fbmm_pid_show, fbmm_pid_store);
-
-static ssize_t fbmm_dir_show(struct kobject *kobj,
-		struct kobj_attribute *attr, char *buf)
-{
-	return sprintf(buf, "%s\n", file_dir);
-}
-
-static ssize_t fbmm_dir_store(struct kobject *kobj,
-		struct kobj_attribute *attr,
-		const char *buf, size_t count)
-{
-	struct path p;
-	int err;
-
-	if (count > PATH_MAX) {
-		memset(file_dir, 0, PATH_MAX);
-		return -ENOMEM;
-	}
-
-	strncpy(file_dir, buf, PATH_MAX);
-
-	// echo likes to put an extra \n at the end of the string
-	// if it's there, remove it
-	if (file_dir[count - 1] == '\n')
-		file_dir[count - 1] = '\0';
-
-	// Check if the given path is actually a valid directory
-	err = kern_path(file_dir, LOOKUP_DIRECTORY, &p);
-
-	if (err) {
-		memset(file_dir, 0, PATH_MAX);
-		return err;
-	}
-
-	// Free the reference to the path so we can unmount the fs
-	path_put(&p);
-
-	return count;
-}
-static struct kobj_attribute fbmm_file_dir_attribute =
-__ATTR(file_dir, 0644, fbmm_dir_show, fbmm_dir_store);
 
 static ssize_t fbmm_stats_show(struct kobject *kobj,
 		struct kobj_attribute *attr, char *buf)
@@ -815,8 +759,6 @@ __ATTR(prealloc_map_populate, 0644, fbmm_prealloc_map_populate_show, fbmm_preall
 
 static struct attribute *file_based_mm_attr[] = {
 	&fbmm_state_attribute.attr,
-	&fbmm_pid_attribute.attr,
-	&fbmm_file_dir_attribute.attr,
 	&fbmm_stats_attribute.attr,
 	&fbmm_dax_pte_fault_size_attribute.attr,
 	&nt_huge_page_zero_attribute.attr,
@@ -833,13 +775,111 @@ static const struct attribute_group file_based_mm_attr_group = {
 };
 
 ///////////////////////////////////////////////////////////////////////////////
+// procfs files
+extern inline struct task_struct *extern_get_proc_task(const struct inode *inode);
+
+static ssize_t fbmm_mnt_dir_read(struct file *file, char __user *ubuf,
+		size_t count, loff_t *ppos)
+{
+	struct task_struct *task = extern_get_proc_task(file_inode(file));
+	char *buffer;
+	char *mt_entry;
+	size_t len, ret;
+
+	if (!task)
+		return -ESRCH;
+
+	buffer = vmalloc(PATH_MAX + 1);
+	if (!buffer) {
+		put_task_struct(task);
+		return -ENOMEM;
+	}
+
+	// See if the selected task has an entry in the maple tree
+	mt_entry = mtree_load(&fbmm_proc_mnt_dirs, task->tgid);
+	if (mt_entry)
+		len = sprintf(buffer, "%s\n", mt_entry);
+	else
+		len = sprintf(buffer, "not enabled\n");
+
+	ret = simple_read_from_buffer(ubuf, count, ppos, buffer, len);
+
+	vfree(buffer);
+	put_task_struct(task);
+
+	return ret;
+}
+
+static ssize_t fbmm_mnt_dir_write(struct file *file, const char __user *ubuf,
+        size_t count, loff_t *ppos)
+{
+	struct task_struct *task;
+	struct path p;
+	char *buffer;
+	bool clear_entry = true;
+	int ret = 0;
+
+	if (count > PATH_MAX) {
+		return -ENOMEM;
+	}
+
+	buffer = vmalloc(count + 1);
+	if (!buffer)
+		return -ENOMEM;
+
+	if (copy_from_user(buffer, ubuf, count)) {
+		vfree(buffer);
+		return -EFAULT;
+	}
+	buffer[count] = 0;
+
+	// echo likes to put an extra \n at the end of the string
+	// if it's there, remove it
+	if (buffer[count - 1] == '\n')
+		buffer[count - 1] = 0;
+
+	task = extern_get_proc_task(file_inode(file));
+	if (!task) {
+		vfree(buffer);
+		return -ESRCH;
+	}
+
+	// Check if the given path is actually a valid directory
+	ret = kern_path(buffer, LOOKUP_DIRECTORY, &p);
+	if (!ret)
+		clear_entry = false;
+
+	if (!clear_entry) {
+		ret = mtree_store(&fbmm_proc_mnt_dirs, task->tgid, buffer, GFP_KERNEL);
+	} else {
+		// We don't need the buffer we created anymore
+		vfree(buffer);
+
+		// If the previous entry stored a value, free it
+		buffer = mtree_erase(&fbmm_proc_mnt_dirs, task->tgid);
+		if (buffer)
+			vfree(buffer);
+	}
+
+	put_task_struct(task);
+	if (ret)
+		return ret;
+	return count;
+}
+
+const struct file_operations proc_fbmm_mnt_dir = {
+	.read = fbmm_mnt_dir_read,
+	.write = fbmm_mnt_dir_write,
+	.llseek = default_llseek,
+};
+
+
+///////////////////////////////////////////////////////////////////////////////
 // Init
 static int __init file_based_mm_init(void)
 {
 	struct kobject *fbmm_kobj;
 	int err;
-
-	memset(file_dir, 0, PATH_MAX);
 
 	fbmm_kobj = kobject_create_and_add("fbmm", mm_kobj);
 	if (unlikely(!fbmm_kobj)) {

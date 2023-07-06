@@ -97,6 +97,7 @@
 #include <linux/resctrl.h>
 #include <linux/cn_proc.h>
 #include <trace/events/oom.h>
+#include <linux/file_based_mm.h>
 #include "internal.h"
 #include "fd.h"
 
@@ -149,6 +150,12 @@ struct pid_entry {
 	NOD(NAME, (S_IFREG|(MODE)),			\
 		NULL, &proc_pid_attr_operations,	\
 		{ .lsm = LSM })
+
+// this is a hack to get get_proc_task in mm/file_based_mm.c
+inline struct task_struct *extern_get_proc_task(const struct inode *inode)
+{
+	return get_proc_task(inode);
+}
 
 /*
  * Count the number of hardlinks for the pid_entry table, excluding the .
@@ -3348,6 +3355,9 @@ static const struct pid_entry tgid_base_stuff[] = {
 #ifdef CONFIG_KSM
 	ONE("ksm_merging_pages",  S_IRUSR, proc_pid_ksm_merging_pages),
 	ONE("ksm_stat",  S_IRUSR, proc_pid_ksm_stat),
+#endif
+#ifdef CONFIG_FILE_BASED_MM
+	REG("fbmm_mnt_dir", S_IRUGO|S_IWUSR, proc_fbmm_mnt_dir),
 #endif
 };
 
