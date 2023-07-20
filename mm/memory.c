@@ -4743,6 +4743,21 @@ static vm_fault_t do_numa_page(struct vm_fault *vmf)
 		last_cpupid = (-1 & LAST_CPUPID_MASK);
 	else
 		last_cpupid = page_cpupid_last(page);
+
+
+	/* Only migrate pages that are active on non-toptier node */
+	if ((sysctl_numa_balancing_mode & NUMA_BALANCING_MEMORY_TIERING) &&
+		!node_is_toptier(page_nid) &&
+		!PageActive(page)) {
+		count_vm_numa_event(NUMA_HINT_FAULTS);
+		if (page_nid == numa_node_id())
+			count_vm_numa_event(NUMA_HINT_FAULTS_LOCAL);
+		mark_page_accessed(page);
+		pte_unmap_unlock(vmf->pte, vmf->ptl);
+		goto out;
+	}
+
+
 	target_nid = numa_migrate_prep(page, vma, vmf->address, page_nid,
 			&flags);
 	if (target_nid == NUMA_NO_NODE) {
