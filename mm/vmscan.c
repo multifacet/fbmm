@@ -2914,7 +2914,10 @@ static void prepare_scan_count(pg_data_t *pgdat, struct scan_control *sc)
 			if (!managed_zone(zone))
 				continue;
 
-			total_high_wmark += high_wmark_pages(zone);
+			if (numa_promotion_tiered_enabled && node_is_toptier(pgdat->node_id))
+				total_high_wmark += demote_wmark_pages(zone);
+			else
+				total_high_wmark += high_wmark_pages(zone);
 		}
 
 		/*
@@ -2951,8 +2954,14 @@ static void get_scan_count(struct lruvec *lruvec, struct scan_control *sc,
 	unsigned long ap, fp;
 	enum lru_list lru;
 
-	/* If we have no swap space, do not bother scanning anon folios. */
-	if (!sc->may_swap || !can_reclaim_anon_pages(memcg, pgdat->node_id, sc)) {
+	/*
+	 * If we have no swap space, do not bother scanning anon pages.
+	 * However, anon pages on toptier node can be demoted via reclaim
+	 * when numa promotion is enabled. Disable the check to prevent
+	 * demotion for no swap space when numa promotion is enabled.
+	 */
+	if (!(sysctl_numa_balancing_mode & NUMA_BALANCING_MEMORY_TIERING) &&
+		(!sc->may_swap || !can_reclaim_anon_pages(memcg, pgdat->node_id, sc))) {
 		scan_balance = SCAN_FILE;
 		goto out;
 	}
@@ -6858,6 +6867,9 @@ static bool pgdat_balanced(pg_data_t *pgdat, int order, int highest_zoneidx)
 	unsigned long mark = -1;
 	struct zone *zone;
 
+	if (numa_promotion_tiered_enabled && node_is_toptier(pgdat->node_id) &&
+			highest_zoneidx >= ZONE_NORMAL)
+		return pgdat_toptier_balanced(pgdat, 0, highest_zoneidx);
 	/*
 	 * Check watermarks bottom-up as lower zones are more likely to
 	 * meet watermarks.
@@ -6955,7 +6967,10 @@ static bool kswapd_shrink_node(pg_data_t *pgdat,
 		if (!managed_zone(zone))
 			continue;
 
-		sc->nr_to_reclaim += max(high_wmark_pages(zone), SWAP_CLUSTER_MAX);
+		if (numa_promotion_tiered_enabled && node_is_toptier(pgdat->node_id))
+			sc->nr_to_reclaim += max(demote_wmark_pages(zone), SWAP_CLUSTER_MAX);
+		else
+			sc->nr_to_reclaim += max(high_wmark_pages(zone), SWAP_CLUSTER_MAX);
 	}
 
 	/*
@@ -7318,8 +7333,23 @@ static void kswapd_try_to_sleep(pg_data_t *pgdat, int alloc_order, int reclaim_o
 		 */
 		set_pgdat_percpu_threshold(pgdat, calculate_normal_threshold);
 
-		if (!kthread_should_stop())
-			schedule();
+		if (!kthread_should_stop()) {
+			/*
+			 * In numa promotion modes, try harder to recover from
+			 * kswapd failures, because direct reclaiming may be
+			 * not triggered.
+			 */
+			if (numa_promotion_tiered_enabled &&
+						node_is_toptier(pgdat->node_id) &&
+					pgdat->kswapd_failures >= MAX_RECLAIM_RETRIES) {
+				remaining = schedule_timeout(10 * HZ);
+				if (!remaining) {
+					pgdat->kswapd_highest_zoneidx = ZONE_MOVABLE;
+					pgdat->kswapd_order = 0;
+				}
+			} else
+				schedule();
+		}
 
 		set_pgdat_percpu_threshold(pgdat, calculate_pressure_threshold);
 	} else {
