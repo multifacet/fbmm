@@ -2914,8 +2914,8 @@ static void prepare_scan_count(pg_data_t *pgdat, struct scan_control *sc)
 			if (!managed_zone(zone))
 				continue;
 
-			if (numa_promotion_tiered_enabled && node_is_toptier(pgdat->node_id))
-				total_high_wmark += demote_wmark_pages(zone);
+			if ((sysctl_numa_balancing_mode & NUMA_BALANCING_MEMORY_TIERING) && node_is_toptier(pgdat->node_id))
+				total_high_wmark += wmark_pages(zone, WMARK_PROMO);
 			else
 				total_high_wmark += high_wmark_pages(zone);
 		}
@@ -6867,9 +6867,9 @@ static bool pgdat_balanced(pg_data_t *pgdat, int order, int highest_zoneidx)
 	unsigned long mark = -1;
 	struct zone *zone;
 
-	if (numa_promotion_tiered_enabled && node_is_toptier(pgdat->node_id) &&
+	if ((sysctl_numa_balancing_mode & NUMA_BALANCING_MEMORY_TIERING) && node_is_toptier(pgdat->node_id) &&
 			highest_zoneidx >= ZONE_NORMAL)
-		return pgdat_toptier_balanced(pgdat, 0, highest_zoneidx);
+		return pgdat_balanced(pgdat, 0, highest_zoneidx);
 	/*
 	 * Check watermarks bottom-up as lower zones are more likely to
 	 * meet watermarks.
@@ -6967,8 +6967,8 @@ static bool kswapd_shrink_node(pg_data_t *pgdat,
 		if (!managed_zone(zone))
 			continue;
 
-		if (numa_promotion_tiered_enabled && node_is_toptier(pgdat->node_id))
-			sc->nr_to_reclaim += max(demote_wmark_pages(zone), SWAP_CLUSTER_MAX);
+		if ((sysctl_numa_balancing_mode & NUMA_BALANCING_MEMORY_TIERING) && node_is_toptier(pgdat->node_id))
+			sc->nr_to_reclaim += max(wmark_pages(zone, WMARK_PROMO), SWAP_CLUSTER_MAX);
 		else
 			sc->nr_to_reclaim += max(high_wmark_pages(zone), SWAP_CLUSTER_MAX);
 	}
@@ -7339,7 +7339,7 @@ static void kswapd_try_to_sleep(pg_data_t *pgdat, int alloc_order, int reclaim_o
 			 * kswapd failures, because direct reclaiming may be
 			 * not triggered.
 			 */
-			if (numa_promotion_tiered_enabled &&
+			if ((sysctl_numa_balancing_mode & NUMA_BALANCING_MEMORY_TIERING) &&
 						node_is_toptier(pgdat->node_id) &&
 					pgdat->kswapd_failures >= MAX_RECLAIM_RETRIES) {
 				remaining = schedule_timeout(10 * HZ);
