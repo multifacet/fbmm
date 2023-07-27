@@ -6868,8 +6868,20 @@ static bool pgdat_balanced(pg_data_t *pgdat, int order, int highest_zoneidx)
 	struct zone *zone;
 
 	if ((sysctl_numa_balancing_mode & NUMA_BALANCING_MEMORY_TIERING) && node_is_toptier(pgdat->node_id) &&
-			highest_zoneidx >= ZONE_NORMAL)
-		return pgdat_balanced(pgdat, 0, highest_zoneidx);
+		highest_zoneidx >= ZONE_NORMAL) {
+		// Implementation of pgdat_toptier_balanced in Al Muraf's original patch
+		zone = pgdat->node_zones + ZONE_NORMAL;
+
+		if (!managed_zone(zone))
+			return true;
+
+		mark = min(wmark_pages(zone, WMARK_PROMO), zone_managed_pages(zone));
+
+		if (zone_page_state(zone, NR_FREE_PAGES) < mark)
+			return false;
+
+		return true;
+    }
 	/*
 	 * Check watermarks bottom-up as lower zones are more likely to
 	 * meet watermarks.
