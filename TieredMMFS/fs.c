@@ -642,7 +642,7 @@ static int tieredmmfs_demote_task(void *data)
         /**
          * Demotion code
          */
-        pages_to_check = min(fast_dev->active_pages, MAX_MIGRATE);
+        pages_to_check = fast_dev->active_pages;
 
         for (i = 0; i < pages_to_check; i++) {
             // Don't migrate past the watermark.
@@ -668,6 +668,9 @@ static int tieredmmfs_demote_task(void *data)
             }
 
             tieredmmfs_demote_one(sbi, &slow_page);
+
+            if (i != 0 && i % MAX_MIGRATE == 0)
+                cond_resched();
         }
 
         // If we have a slow_page left over, put it back in the free list
@@ -680,7 +683,7 @@ static int tieredmmfs_demote_task(void *data)
             slow_page = NULL;
         }
 
-        pages_to_check = min(slow_dev->active_pages, MAX_MIGRATE);
+        pages_to_check = slow_dev->active_pages;
 
         for (i = 0; i < pages_to_check; i++) {
             // Don't migrate past the watermark.
@@ -704,6 +707,9 @@ static int tieredmmfs_demote_task(void *data)
             }
 
             tieredmmfs_promote_one(sbi, &fast_page);
+
+            if (i != 0 && i % MAX_MIGRATE == 0)
+                cond_resched();
         }
 
         // If we have a fast_page left over, put it back in the free list
