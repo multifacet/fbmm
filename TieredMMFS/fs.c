@@ -28,6 +28,9 @@
 static const struct super_operations tieredmmfs_ops;
 static const struct inode_operations tieredmmfs_dir_inode_operations;
 
+// The maximum number of pages to check for migration before yielding cpu
+const u64 MAX_MIGRATE = 1 << 20;
+
 // This is a copy of the sb_info struct. It should only be used in sysfs files
 static struct tieredmmfs_sb_info *sysfs_sb_info = NULL;
 static u64 num_promotions = 0;
@@ -625,13 +628,67 @@ static void tieredmmfs_promote_one(struct tieredmmfs_sb_info *sbi, struct tiered
     num_promotions++;
 }
 
-// Reader Beware: This function is a mess of locking and unlocking
+// Reader Beware: The next two function is a mess of locking and unlocking
+// TODO: The promote and demote tasks are similar enough that maybe they can
+// be one function, just called with different params
+static int tieredmmfs_promote_task(void *data)
+{
+    struct tieredmmfs_page *fast_page = NULL;
+    struct tieredmmfs_sb_info *sbi = data;
+    struct tieredmmfs_dev_info *fast_dev = &sbi->mem[FAST_MEM];
+    struct tieredmmfs_dev_info *slow_dev = &sbi->mem[SLOW_MEM];
+    u64 pages_to_check;
+    u64 i;
+
+    while (!kthread_should_stop()) {
+        pages_to_check = slow_dev->active_pages;
+
+        for (i = 0; i < pages_to_check; i++) {
+            // Don't migrate past the watermark.
+            if (fast_dev->free_pages <= sbi->alloc_watermark) {
+                break;
+            }
+
+            // If we don't have a fast page to move to, get one
+            if (!fast_page) {
+                spin_lock(&fast_dev->lock);
+
+                if (list_empty(&fast_dev->free_list)) {
+                    spin_unlock(&fast_dev->lock);
+                    break;
+                }
+
+                fast_page = list_first_entry(&fast_dev->free_list, struct tieredmmfs_page, list);
+                list_del(&fast_page->list);
+                fast_dev->free_pages--;
+                spin_unlock(&fast_dev->lock);
+            }
+
+            tieredmmfs_promote_one(sbi, &fast_page);
+
+            if (i != 0 && i % MAX_MIGRATE == 0)
+                cond_resched();
+        }
+
+        // If we have a fast_page left over, put it back in the free list
+        if (fast_page) {
+            spin_lock(&fast_dev->lock);
+            list_add(&fast_page->list, &fast_dev->free_list);
+            fast_dev->free_pages++;
+            spin_unlock(&fast_dev->lock);
+
+            fast_page = NULL;
+        }
+
+        msleep_interruptible(migrate_task_int);
+    }
+
+    return 0;
+}
+
 static int tieredmmfs_demote_task(void *data)
 {
-    // The maximum number of pages to migrate in one iteration
-    const u64 MAX_MIGRATE = 1 << 20;
     struct tieredmmfs_page *slow_page = NULL;
-    struct tieredmmfs_page *fast_page = NULL;
     struct tieredmmfs_sb_info *sbi = data;
     struct tieredmmfs_dev_info *fast_dev = &sbi->mem[FAST_MEM];
     struct tieredmmfs_dev_info *slow_dev = &sbi->mem[SLOW_MEM];
@@ -683,47 +740,9 @@ static int tieredmmfs_demote_task(void *data)
             slow_page = NULL;
         }
 
-        pages_to_check = slow_dev->active_pages;
-
-        for (i = 0; i < pages_to_check; i++) {
-            // Don't migrate past the watermark.
-            if (fast_dev->free_pages <= sbi->alloc_watermark) {
-                break;
-            }
-
-            // If we don't have a fast page to move to, get one
-            if (!fast_page) {
-                spin_lock(&fast_dev->lock);
-
-                if (list_empty(&fast_dev->free_list)) {
-                    spin_unlock(&fast_dev->lock);
-                    break;
-                }
-
-                fast_page = list_first_entry(&fast_dev->free_list, struct tieredmmfs_page, list);
-                list_del(&fast_page->list);
-                fast_dev->free_pages--;
-                spin_unlock(&fast_dev->lock);
-            }
-
-            tieredmmfs_promote_one(sbi, &fast_page);
-
-            if (i != 0 && i % MAX_MIGRATE == 0)
-                cond_resched();
-        }
-
-        // If we have a fast_page left over, put it back in the free list
-        if (fast_page) {
-            spin_lock(&fast_dev->lock);
-            list_add(&fast_page->list, &fast_dev->free_list);
-            fast_dev->free_pages++;
-            spin_unlock(&fast_dev->lock);
-
-            fast_page = NULL;
-        }
-
         msleep_interruptible(migrate_task_int);
     }
+
     return 0;
 }
 
@@ -1223,14 +1242,16 @@ static int tieredmmfs_fill_super(struct super_block *sb, struct fs_context *fc)
         return -ENOMEM;
     }
 
-    // Start the page migration thread
+    // Start the page migration threads
+    sbi->promote_task = kthread_create(tieredmmfs_promote_task, sbi, "TMMFS Promote Thread");
     sbi->demote_task = kthread_create(tieredmmfs_demote_task, sbi, "TMMFS Demote Thread");
-    if (!sbi->demote_task) {
+    if (!sbi->promote_task || !sbi->demote_task) {
         pr_err("TieredMMFS: Failed to create the migration task");
         kfree(sbi);
         return -ENOMEM;
     }
 
+    wake_up_process(sbi->promote_task);
     wake_up_process(sbi->demote_task);
 
     // Make the demotion watermark 2% of the total mem

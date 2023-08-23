@@ -52,6 +52,7 @@ struct tieredmmfs_dev_info {
 
 struct tieredmmfs_sb_info {
     struct tieredmmfs_dev_info mem[2];
+    struct task_struct *promote_task;
     struct task_struct *demote_task;
     // Start demotion if fast_mem has less than demotion_watermark% of memory free
     u64 demotion_watermark;
