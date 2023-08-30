@@ -1566,11 +1566,21 @@ static void numa_promotion_adjust_threshold(struct pglist_data *pgdat,
 }
 
 bool should_numa_migrate_memory(struct task_struct *p, struct page * page,
-				int src_nid, int dst_cpu)
+				int src_nid, int dst_cpu, int flags)
 {
 	struct numa_group *ng = deref_curr_numa_group(p);
 	int dst_nid = cpu_to_node(dst_cpu);
 	int last_cpupid, this_cpupid;
+
+	count_vm_numa_event(PGPROMOTE_CANDIDATE_EVENT);
+
+	if (flags & TNF_DEMOTED)
+		count_vm_numa_event(PGPROMOTE_CANDIDATE_DEMOTED);
+
+	if (page_is_file_lru(page))
+		count_vm_numa_event(PGPROMOTE_CANDIDATE_FILE);
+	else
+		count_vm_numa_event(PGPROMOTE_CANDIDATE_ANON);
 
 	/*
 	 * The pages in slow memory node should be migrated according

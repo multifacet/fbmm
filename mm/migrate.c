@@ -51,6 +51,7 @@
 #include <linux/random.h>
 #include <linux/sched/sysctl.h>
 #include <linux/memory-tiers.h>
+#include <linux/sched/numa_balancing.h>
 
 #include <asm/tlbflush.h>
 
@@ -259,6 +260,15 @@ static bool remove_migration_pte(struct folio *folio,
 		} else
 #endif
 		{
+#ifdef CONFIG_NUMA_BALANCING
+			if (page_is_demoted(folio_page(folio, 0)) && vma_migratable(vma)) {
+				bool writable = pte_write(pte);
+
+				pte = pte_modify(pte, PAGE_NONE);
+				if (writable)
+					pte = pte_mkwrite(pte);
+			}
+#endif
 			if (folio_test_anon(folio))
 				page_add_anon_rmap(new, vma, pvmw.address,
 						   rmap_flags);
@@ -397,6 +407,9 @@ int folio_migrate_mapping(struct address_space *mapping,
 	int dirty;
 	int expected_count = folio_expected_refs(mapping, folio) + extra_count;
 	long nr = folio_nr_pages(folio);
+
+	if (folio_ref_count(folio) != expected_count)
+		count_vm_events(PGMIGRATE_REFCOUNT_FAIL, folio_nr_pages(folio));
 
 	if (!mapping) {
 		/* Anonymous page without mapping */
@@ -1190,6 +1203,11 @@ static int unmap_and_move(new_page_t get_new_page,
 	newpage = get_new_page(&src->page, private);
 	if (!newpage)
 		return -ENOMEM;
+
+	/* TODO: check whether Ksm pages can be demoted? */
+	if (reason == MR_DEMOTION && !folio_test_ksm(src))
+		set_page_demoted(newpage);
+
 	dst = page_folio(newpage);
 
 	dst->private = NULL;
@@ -1559,6 +1577,7 @@ split_folio_migration:
 				/* nr_failed isn't updated for not used */
 				nr_large_failed += large_retry;
 				nr_thp_failed += thp_retry;
+				count_vm_events(PGMIGRATE_NOMEM_FAIL, folio_nr_pages(folio));
 				goto out;
 			case -EAGAIN:
 				if (is_large) {
@@ -2169,6 +2188,7 @@ static int numamigrate_isolate_page(pg_data_t *pgdat, struct page *page)
 			if (managed_zone(pgdat->node_zones + z))
 				break;
 		}
+		count_vm_events(PGMIGRATE_DST_NODE_FULL_FAIL, thp_nr_pages(page));
 		wakeup_kswapd(pgdat->node_zones + z, 0, order, ZONE_MOVABLE);
 		return 0;
 	}
@@ -2202,6 +2222,7 @@ int migrate_misplaced_page(struct page *page, struct vm_area_struct *vma,
 	unsigned int nr_succeeded;
 	LIST_HEAD(migratepages);
 	int nr_pages = thp_nr_pages(page);
+	bool is_file;
 
 	/*
 	 * Don't migrate file pages that are mapped in multiple processes
@@ -2211,17 +2232,14 @@ int migrate_misplaced_page(struct page *page, struct vm_area_struct *vma,
 	    (vma->vm_flags & VM_EXEC))
 		goto out;
 
-	/*
-	 * Also do not migrate dirty pages as not all filesystems can move
-	 * dirty pages in MIGRATE_ASYNC mode which is a waste of cycles.
-	 */
-	if (page_is_file_lru(page) && PageDirty(page))
-		goto out;
-
 	isolated = numamigrate_isolate_page(pgdat, page);
-	if (!isolated)
+	if (!isolated) {
+		count_vm_events(PGMIGRATE_NUMA_ISOLATE_FAIL, thp_nr_pages(page));
 		goto out;
+	}
 
+	is_file = page_is_file_lru(page);
+	count_vm_numa_event(PGPROMOTE_TRIED);
 	list_add(&page->lru, &migratepages);
 	nr_remaining = migrate_pages(&migratepages, alloc_misplaced_dst_page,
 				     NULL, node, MIGRATE_ASYNC,
@@ -2237,6 +2255,11 @@ int migrate_misplaced_page(struct page *page, struct vm_area_struct *vma,
 	}
 	if (nr_succeeded) {
 		count_vm_numa_events(NUMA_PAGE_MIGRATE, nr_succeeded);
+		if (is_file)
+			count_vm_numa_events(PGPROMOTE_FILE, nr_succeeded);
+		else
+			count_vm_numa_events(PGPROMOTE_ANON, nr_succeeded);
+
 		if (!node_is_toptier(page_to_nid(page)) && node_is_toptier(node))
 			mod_node_page_state(pgdat, PGPROMOTE_SUCCESS,
 					    nr_succeeded);

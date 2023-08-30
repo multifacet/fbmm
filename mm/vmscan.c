@@ -1598,6 +1598,7 @@ static unsigned int demote_folio_list(struct list_head *demote_folios,
 	int target_nid = next_demotion_node(pgdat->node_id);
 	unsigned int nr_succeeded;
 	nodemask_t allowed_mask;
+	bool file_lru;
 
 	struct migration_target_control mtc = {
 		/*
@@ -1617,6 +1618,8 @@ static unsigned int demote_folio_list(struct list_head *demote_folios,
 	if (target_nid == NUMA_NO_NODE)
 		return 0;
 
+	file_lru = folio_is_file_lru(lru_to_folio(demote_folios));
+
 	node_get_allowed_targets(pgdat, &allowed_mask);
 
 	/* Demotion ignores all cpuset and mempolicy settings */
@@ -1625,6 +1628,11 @@ static unsigned int demote_folio_list(struct list_head *demote_folios,
 		      &nr_succeeded);
 
 	__count_vm_events(PGDEMOTE_KSWAPD + reclaimer_offset(), nr_succeeded);
+
+	if (file_lru)
+		__count_vm_events(PGDEMOTE_FILE, nr_succeeded);
+	else
+		__count_vm_events(PGDEMOTE_ANON, nr_succeeded);
 
 	return nr_succeeded;
 }
