@@ -5,6 +5,7 @@
 #include <linux/kobject.h>
 #include <linux/memory.h>
 #include <linux/memory-tiers.h>
+#include <linux/sched/sysctl.h>
 
 #include "internal.h"
 
@@ -244,6 +245,10 @@ bool node_is_toptier(int node)
 	bool toptier;
 	pg_data_t *pgdat;
 	struct memory_tier *memtier;
+
+	// Cheating here - simple way to have only node 0 be toptier
+	if (sysctl_numa_balancing_mode & NUMA_BALANCING_MEMORY_TIERING)
+		return node == 0;
 
 	pgdat = NODE_DATA(node);
 	if (!pgdat)
