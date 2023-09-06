@@ -38,6 +38,7 @@ static DEFINE_MUTEX(memory_tier_lock);
 static LIST_HEAD(memory_tiers);
 static struct node_memory_type_map node_memory_types[MAX_NUMNODES];
 static struct memory_dev_type *default_dram_type;
+static struct memory_dev_type *default_slow_tier_type;
 
 static struct bus_type memory_tier_subsys = {
 	.name = "memory_tiering",
@@ -245,10 +246,6 @@ bool node_is_toptier(int node)
 	bool toptier;
 	pg_data_t *pgdat;
 	struct memory_tier *memtier;
-
-	// Cheating here - simple way to have only node 0 be toptier
-	if (sysctl_numa_balancing_mode & NUMA_BALANCING_MEMORY_TIERING)
-		return node == 0;
 
 	pgdat = NODE_DATA(node);
 	if (!pgdat)
@@ -478,6 +475,14 @@ static inline void __init_node_memory_type(int node, struct memory_dev_type *mem
 	}
 }
 
+int do_tpp = 0;
+static int __init parse_do_tpp(char *arg)
+{
+	do_tpp = 1;
+	return 0;
+}
+early_param("do_tpp", parse_do_tpp);
+
 static struct memory_tier *set_node_memory_tier(int node)
 {
 	struct memory_tier *memtier;
@@ -490,7 +495,11 @@ static struct memory_tier *set_node_memory_tier(int node)
 	if (!node_state(node, N_MEMORY))
 		return ERR_PTR(-EINVAL);
 
-	__init_node_memory_type(node, default_dram_type);
+    // Hack where we force NUMA node 1 as remote tier
+	if (node == 1 && do_tpp)
+		__init_node_memory_type(node, default_slow_tier_type);
+	else
+		__init_node_memory_type(node, default_dram_type);
 
 	memtype = node_memory_types[node].memtype;
 	node_set(node, memtype->nodes);
@@ -652,6 +661,9 @@ static int __init memory_tier_init(void)
 	default_dram_type = alloc_memory_type(MEMTIER_ADISTANCE_DRAM);
 	if (IS_ERR(default_dram_type))
 		panic("%s() failed to allocate default DRAM tier\n", __func__);
+	default_slow_tier_type = alloc_memory_type(MEMTIER_ADISTANCE_DRAM * 5);
+	if (IS_ERR(default_slow_tier_type))
+		panic("%s() failed to allocate default slow tier\n", __func__);
 
 	/*
 	 * Look at all the existing N_MEMORY nodes and add them to
