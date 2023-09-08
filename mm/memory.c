@@ -4753,8 +4753,7 @@ static vm_fault_t do_numa_page(struct vm_fault *vmf)
 		if (page_nid == numa_node_id())
 			count_vm_numa_event(NUMA_HINT_FAULTS_LOCAL);
 		mark_page_accessed(page);
-		pte_unmap_unlock(vmf->pte, vmf->ptl);
-		goto out;
+		goto out_map;
 	}
 
 
