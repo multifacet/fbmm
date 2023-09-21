@@ -2677,13 +2677,6 @@ static void shrink_active_list(unsigned long nr_to_scan,
 				list_add(&folio->lru, &l_active);
 				continue;
 			}
-
-			if((sysctl_numa_balancing_mode & NUMA_BALANCING_MEMORY_TIERING)
-				&& node_is_toptier(pgdat->node_id)) {
-				nr_rotated += folio_nr_pages(folio);
-				list_add(&folio->lru, &l_active);
-				continue;
-			}
 		}
 
 		folio_clear_active(folio);	/* we are de-activating */
