@@ -830,7 +830,7 @@ static bool folio_demote_count_one(struct folio *folio,
 	// give the correct result
 	count++;
 
-	if ((first_count + second_count + always_count + cold_count) % 10000 == 0)
+	if ((first_count + second_count + always_count + cold_count) % 100000 == 0)
 		pr_err("First %ld Always %ld Second %ld Cold %ld %ld %ld\n", first_count, always_count, second_count, cold_count, vma->vm_start, vma->vm_end);
 
 	mtree_store(&demote_count, address, (void*)count, GFP_KERNEL);
