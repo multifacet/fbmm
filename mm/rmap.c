@@ -794,6 +794,69 @@ out:
 	return pmd;
 }
 
+static DEFINE_MTREE(demote_count);
+#define GUPS_ADDRESS (0x7f5707200000ul)
+#define FIRST_HOT (0x7F5777200000ul)
+#define SECOND_HOT (0x7F5857200000ul)
+#define ALWAYS_HOT (0x7F57E7200000ul)
+#define GUPS_END (0x7F5887200000ul)
+static bool folio_demote_count_one(struct folio *folio,
+		struct vm_area_struct *vma, unsigned long address, void *arg)
+{
+	unsigned long count;
+	static unsigned long first_count = 0;
+	static unsigned long second_count = 0;
+	static unsigned long always_count = 0;
+	static unsigned long cold_count = 0;
+
+	if (address < GUPS_ADDRESS)
+		return false;
+	if (address >= GUPS_END)
+		return false;
+
+	if (address >= GUPS_ADDRESS && address < FIRST_HOT)
+		first_count++;
+	else if (address >= FIRST_HOT && address < ALWAYS_HOT)
+		always_count++;
+	else if (address >= ALWAYS_HOT && address < SECOND_HOT)
+		second_count++;
+	else
+		cold_count++;
+
+	count = (unsigned long)mtree_load(&demote_count, address);
+
+	// If this entry has been seen before, we want to increment the count
+	// If it hasn't been seen before, it's value will be 0, so incrementing will
+	// give the correct result
+	count++;
+
+	if ((first_count + second_count + always_count + cold_count) % 10000 == 0)
+		pr_err("First %ld Always %ld Second %ld Cold %ld %ld %ld\n", first_count, always_count, second_count, cold_count, vma->vm_start, vma->vm_end);
+
+	mtree_store(&demote_count, address, (void*)count, GFP_KERNEL);
+
+	return false;
+}
+
+static bool invalid_folio_demote_vma(struct vm_area_struct *vma, void *arg) {
+	return false;
+}
+void folio_demote_count(struct folio *folio)
+{
+	struct rmap_walk_control rwc = {
+		.rmap_one = folio_demote_count_one,
+		.arg = NULL,
+		.anon_lock = folio_lock_anon_vma_read,
+		.try_lock = true,
+		.invalid_vma = invalid_folio_demote_vma,
+	};
+
+	if (!folio_test_anon(folio))
+		return;
+
+	rmap_walk(folio, &rwc);
+}
+
 struct folio_referenced_arg {
 	int mapcount;
 	int referenced;

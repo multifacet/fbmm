@@ -356,6 +356,7 @@ static inline int page_try_share_anon_rmap(struct page *page)
  */
 int folio_referenced(struct folio *, int is_locked,
 			struct mem_cgroup *memcg, unsigned long *vm_flags);
+void folio_demote_count(struct folio *folio);
 
 void try_to_migrate(struct folio *folio, enum ttu_flags flags);
 void try_to_unmap(struct folio *, enum ttu_flags flags);

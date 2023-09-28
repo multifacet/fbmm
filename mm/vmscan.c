@@ -1831,6 +1831,7 @@ retry:
 		 */
 		if (do_demote_pass &&
 		    (thp_migration_supported() || !folio_test_large(folio))) {
+			//folio_demote_count(folio);
 			list_add(&folio->lru, &demote_folios);
 			folio_unlock(folio);
 			continue;
