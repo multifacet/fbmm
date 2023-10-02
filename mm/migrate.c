@@ -2155,16 +2155,6 @@ static struct page *alloc_misplaced_dst_page(struct page *page,
 	gfp_t gfp = __GFP_THISNODE;
 	struct folio *new;
 
-	if ((sysctl_numa_balancing_mode & NUMA_BALANCING_MEMORY_TIERING)) {
-		pg_data_t *pgdat = NODE_DATA(nid);
-		struct zone *zone = pgdat->node_zones + ZONE_NORMAL;
-		unsigned long mark = low_wmark_pages(zone);
-
-		if (zone_page_state(zone, NR_FREE_PAGES) < mark) {
-			return NULL;
-		}
-	}
-
 	if (order > 0)
 		gfp |= GFP_TRANSHUGE_LIGHT;
 	else {
