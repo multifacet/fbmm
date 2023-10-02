@@ -7397,7 +7397,7 @@ static int kremoteaged(void *p)
 	while (true) {
 		kswapd_age_node(pgdat, &sc);
 
-		msleep_interruptible(100);
+		msleep_interruptible(1000);
 	}
 
 	return 0;
