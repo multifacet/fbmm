@@ -41,6 +41,7 @@
 #include <linux/kthread.h>
 #include <linux/freezer.h>
 #include <linux/memcontrol.h>
+#include <linux/mempolicy.h>
 #include <linux/migrate.h>
 #include <linux/delayacct.h>
 #include <linux/sysctl.h>
@@ -190,6 +191,7 @@ static void set_task_reclaim_state(struct task_struct *task,
 
 static LIST_HEAD(shrinker_list);
 static DECLARE_RWSEM(shrinker_rwsem);
+int demote_scale_factor = 200;
 
 #ifdef CONFIG_MEMCG
 static int shrinker_nr_max;
@@ -3806,6 +3808,30 @@ static bool pgdat_balanced(pg_data_t *pgdat, int order, int highest_zoneidx)
 		return true;
 
 	return false;
+}
+
+bool pgdat_toptier_balanced(pg_data_t *pgdat, int order, int zone_idx)
+{
+	unsigned long mark;
+	struct zone *zone;
+
+	if (!node_is_toptier(pgdat->node_id) ||
+		!numa_promotion_tiered_enabled ||
+		order > 0 || zone_idx < ZONE_NORMAL) {
+		return true;
+	}
+
+	zone = pgdat->node_zones + ZONE_NORMAL;
+
+	if (!managed_zone(zone))
+		return true;
+
+	mark = min(demote_wmark_pages(zone), zone_managed_pages(zone));
+
+	if (zone_page_state(zone, NR_FREE_PAGES) < mark)
+		return false;
+
+	return true;
 }
 
 /* Clear pgdat state for congested, dirty or under writeback. */
