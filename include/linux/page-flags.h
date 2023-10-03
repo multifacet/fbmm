@@ -22,7 +22,7 @@
  * Pages marked as PG_reserved include:
  * - Pages part of the kernel image (including vDSO) and similar (e.g. BIOS,
  *   initrd, HW tables)
- * - Pages reserved or allocated early during boot (before the page allocator
+sysctl_numa_balancing_mode & NUMA_BALANCING_MEMORY_TIERING * - Pages reserved or allocated early during boot (before the page allocator
  *   was initialized). This includes (depending on the architecture) the
  *   initial vmemmap, initial page tables, crashkernel, elfcorehdr, and much
  *   much more. Once (if ever) freed, PG_reserved is cleared and they will
@@ -137,6 +137,9 @@ enum pageflags {
 #endif
 #ifdef CONFIG_64BIT
 	PG_arch_2,
+#ifdef CONFIG_NUMA_BALANCING
+	PG_demoted,
+#endif
 #endif
 #ifdef CONFIG_KASAN_HW_TAGS
 	PG_skip_kasan_poison,
@@ -461,6 +464,12 @@ PAGEFLAG(Idle, idle, PF_ANY)
 PAGEFLAG(SkipKASanPoison, skip_kasan_poison, PF_HEAD)
 #else
 PAGEFLAG_FALSE(SkipKASanPoison)
+#endif
+
+#if defined(CONFIG_NUMA_BALANCING) && defined(CONFIG_64BIT)
+TESTPAGEFLAG(Demoted, demoted, PF_NO_TAIL)
+SETPAGEFLAG(Demoted, demoted, PF_NO_TAIL)
+TESTCLEARFLAG(Demoted, demoted, PF_NO_TAIL)
 #endif
 
 /*
