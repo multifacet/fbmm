@@ -2819,9 +2819,7 @@ static bool inactive_is_low(struct lruvec *lruvec, enum lru_list inactive_lru)
 	active = lruvec_page_state(lruvec, NR_LRU_BASE + active_lru);
 
 	gb = (inactive + active) >> (30 - PAGE_SHIFT);
-	if (sysctl_numa_balancing_mode & NUMA_BALANCING_MEMORY_TIERING)
-		inactive_ratio = 1;
-	else if (gb)
+	if (gb)
 		inactive_ratio = int_sqrt(10 * gb);
 	else
 		inactive_ratio = 1;
@@ -7384,27 +7382,6 @@ static void kswapd_try_to_sleep(pg_data_t *pgdat, int alloc_order, int reclaim_o
 	finish_wait(&pgdat->kswapd_wait, &wait);
 }
 
-static int kremoteaged(void *p)
-{
-	pg_data_t *pgdat = NODE_DATA(1);
-	struct scan_control sc = {
-		.gfp_mask = GFP_KERNEL,
-		.order = 1,
-		.may_unmap = 1,
-		.reclaim_idx = MAX_NR_ZONES - 1,
-		.may_writepage = 0,
-		.may_swap = 0,
-	};
-
-	while (true) {
-		kswapd_age_node(pgdat, &sc);
-
-		msleep_interruptible(1000);
-	}
-
-	return 0;
-}
-
 /*
  * The background pageout daemon, started as a kernel thread
  * from the init process.
@@ -7425,7 +7402,6 @@ static int kswapd(void *p)
 	pg_data_t *pgdat = (pg_data_t *)p;
 	struct task_struct *tsk = current;
 	const struct cpumask *cpumask = cpumask_of_node(pgdat->node_id);
-	struct task_struct *agetask = NULL;
 
 	if (!cpumask_empty(cpumask))
 		set_cpus_allowed_ptr(tsk, cpumask);
@@ -7458,11 +7434,6 @@ static int kswapd(void *p)
 kswapd_try_sleep:
 		kswapd_try_to_sleep(pgdat, alloc_order, reclaim_order,
 					highest_zoneidx);
-
-		if (!agetask && pgdat->node_id == 0) {
-			agetask = kthread_create(kremoteaged, NULL, "Age Thread");
-			wake_up_process(agetask);
-		}
 
 		/* Read the new order and highest_zoneidx */
 		alloc_order = READ_ONCE(pgdat->kswapd_order);
