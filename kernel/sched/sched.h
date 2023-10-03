@@ -52,6 +52,7 @@
 #include <linux/kthread.h>
 #include <linux/membarrier.h>
 #include <linux/migrate.h>
+#include <linux/mempolicy.h>
 #include <linux/mm_inline.h>
 #include <linux/mmu_context.h>
 #include <linux/nmi.h>
@@ -2408,6 +2409,12 @@ extern int sysctl_resched_latency_warn_ms;
 extern int sysctl_resched_latency_warn_once;
 
 extern unsigned int sysctl_sched_tunable_scaling;
+
+#define NUMA_BALANCING_DISABLED			0x0
+#define NUMA_BALANCING_NORMAL			0x1
+#define NUMA_BALANCING_TIERED_MEMORY	0x2
+
+extern int sysctl_numa_balancing_mode;
 
 extern unsigned int sysctl_numa_balancing_scan_delay;
 extern unsigned int sysctl_numa_balancing_scan_period_min;

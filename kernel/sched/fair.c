@@ -1418,7 +1418,7 @@ bool should_numa_migrate_memory(struct task_struct *p, struct page * page,
 
 	count_vm_numa_event(PGPROMOTE_CANDIDATE);
 
-	if (flags & TNF_DEMOTED)
+	if (numa_demotion_enabled && (flags & TNF_DEMOTED))
 		count_vm_numa_event(PGPROMOTE_CANDIDATE_DEMOTED);
 
 	if (page_is_file_lru(page))
@@ -1428,6 +1428,14 @@ bool should_numa_migrate_memory(struct task_struct *p, struct page * page,
 
 	this_cpupid = cpu_pid_to_cpupid(dst_cpu, current->pid);
 	last_cpupid = page_cpupid_xchg_last(page, this_cpupid);
+
+	/*
+	 * The pages in non-toptier memory node should be migrated
+	 * according to hot/cold instead of accessing CPU node.
+	 */
+	if (numa_promotion_tiered_enabled && !node_is_toptier(src_nid))
+		return true;
+
 
 	/*
 	 * Allow first faults or private faults to migrate immediately early in
