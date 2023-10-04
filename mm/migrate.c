@@ -2182,6 +2182,11 @@ static int numamigrate_isolate_page(pg_data_t *pgdat, struct page *page)
 	if (!migrate_balanced_pgdat(pgdat, nr_pages)) {
 		int z;
 
+		if (sysctl_numa_balancing_mode & NUMA_BALANCING_MEMORY_TIERING) {
+			count_vm_events(PGMIGRATE_DST_NODE_FULL_FAIL, thp_nr_pages(page));
+			return 0;
+		}
+
 		if (!(sysctl_numa_balancing_mode & NUMA_BALANCING_MEMORY_TIERING))
 			return 0;
 		for (z = pgdat->nr_zones - 1; z >= 0; z--) {
