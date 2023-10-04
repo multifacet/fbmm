@@ -2171,6 +2171,7 @@ static int numamigrate_isolate_page(pg_data_t *pgdat, struct page *page)
 {
 	int nr_pages = thp_nr_pages(page);
 	int order = compound_order(page);
+	static time64_t last_wakeup_kswapd = 0;
 
 	VM_BUG_ON_PAGE(order && !PageTransHuge(page), page);
 
@@ -2183,8 +2184,10 @@ static int numamigrate_isolate_page(pg_data_t *pgdat, struct page *page)
 		int z;
 
 		if (sysctl_numa_balancing_mode & NUMA_BALANCING_MEMORY_TIERING) {
-			count_vm_events(PGMIGRATE_DST_NODE_FULL_FAIL, thp_nr_pages(page));
-			return 0;
+			if (ktime_get_seconds() - last_wakeup_kswapd <= 5) {
+				count_vm_events(PGMIGRATE_DST_NODE_FULL_FAIL, thp_nr_pages(page));
+				return 0;
+			}
 		}
 
 		if (!(sysctl_numa_balancing_mode & NUMA_BALANCING_MEMORY_TIERING))
@@ -2194,6 +2197,7 @@ static int numamigrate_isolate_page(pg_data_t *pgdat, struct page *page)
 				break;
 		}
 		count_vm_events(PGMIGRATE_DST_NODE_FULL_FAIL, thp_nr_pages(page));
+		last_wakeup_kswapd = ktime_get_seconds();
 		wakeup_kswapd(pgdat->node_zones + z, 0, order, ZONE_MOVABLE);
 		return 0;
 	}
