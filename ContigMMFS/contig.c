@@ -292,7 +292,17 @@ static const struct inode_operations contigmmfs_dir_inode_operations = {
 
 static int contigmmfs_statfs(struct dentry *dentry, struct kstatfs *buf)
 {
-    //TODO
+    struct super_block *sb = dentry->d_sb;
+    struct contigmmfs_sb_info *sbi = CMMFS_SB(sb);
+
+    buf->f_type = sb->s_magic;
+    buf->f_bsize = PAGE_SIZE;
+    buf->f_blocks = sbi->num_pages;
+    buf->f_bfree = buf->f_bavail = sbi->num_pages;
+    buf->f_files = LONG_MAX;
+    buf->f_ffree = LONG_MAX;
+    buf->f_namelen = 255;
+
     return 0;
 }
 
