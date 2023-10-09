@@ -28,7 +28,52 @@ struct contigmmfs_inode_info *CMMFS_I(struct inode *inode)
 
 static vm_fault_t contigmmfs_fault(struct vm_fault *vmf)
 {
-    return VM_FAULT_OOM;
+    struct vm_area_struct *vma = vmf->vma;
+    struct inode *inode = vma->vm_file->f_inode;
+    struct contigmmfs_inode_info *inode_info;
+    struct contigmmfs_sb_info *sbi;
+    struct contigmmfs_contig_alloc *region;
+    struct page *page;
+    pte_t entry;
+
+    inode_info = CMMFS_I(inode);
+    sbi = CMMFS_SB(inode->i_sb);
+
+    // Get the contiguous region that this fault belongs to
+    region = mt_prev(&inode_info->mt, vmf->address + 1, 0);
+    //pr_err("region %px\n", region);
+    if (!region || region->va_start > vmf->address || region->va_end <= vmf->address)
+        return VM_FAULT_OOM;
+
+    page = folio_page(region->folio, ((vmf->address - region->va_start) >> PAGE_SHIFT));
+    vmf->page = page;
+
+    // For now, do nothing if the pte already exists
+    if (vmf->pte) {
+        return 0;
+    }
+
+    if (pte_alloc(vma->vm_mm, vmf->pmd))
+        return VM_FAULT_OOM;
+    vmf->pte = pte_offset_map_lock(vma->vm_mm, vmf->pmd, vmf->address, &vmf->ptl);
+    if (!pte_none(*vmf->pte)) {
+        goto unlock;
+    }
+
+    // Construct the pte entry
+    entry = mk_pte(page, vma->vm_page_prot);
+    entry = pte_mkyoung(entry);
+    if (vma->vm_flags & VM_WRITE) {
+        entry = pte_mkwrite(pte_mkdirty(entry));
+    }
+
+    page_add_file_rmap(page, vma, false);
+    set_pte_at(vma->vm_mm, vmf->address, vmf->pte, entry);
+    folio_get(region->folio);
+
+unlock:
+    pte_unmap_unlock(vmf->pte, vmf->ptl);
+    return 0;
 }
 
 static struct vm_operations_struct contigmmfs_vm_ops = {
@@ -39,11 +84,84 @@ static struct vm_operations_struct contigmmfs_vm_ops = {
 
 static int contigmmfs_mmap(struct file *file, struct vm_area_struct *vma)
 {
+    int nid = numa_node_id();
+    pg_data_t *pgdat = NODE_DATA(nid);
+    struct zone *zone = &pgdat->node_zones[ZONE_NORMAL];
+    struct inode *inode = file->f_inode;
+    struct contigmmfs_inode_info *inode_info = CMMFS_I(inode);
+    struct contigmmfs_sb_info *sbi = CMMFS_SB(inode->i_sb);
+    struct contigmmfs_contig_alloc *region = NULL;
+    struct folio *new_folio = NULL;
+    u64 pages_to_alloc = (vma->vm_end - vma->vm_start) >> PAGE_SHIFT;
+    u64 current_va = vma->vm_start;
+
+    while(pages_to_alloc > 0) {
+        u64 folio_size;
+
+        region = NULL;
+        new_folio = NULL;
+        // Using algorithm from redundant memory mapping paper
+        for (int order = MAX_ORDER - 1; order >= 0; order--) {
+            bool enough_in_order = false;
+
+            // Make sure we aren't allocating more than we need
+            if (pages_to_alloc < (1 << order))
+                continue;
+            // Go to the next order if there is nothing in this one
+            for (int j = order; j < MAX_ORDER; j++) {
+                if (zone->free_area[j].nr_free > 0) {
+                    enough_in_order = true;
+                    break;
+                }
+            }
+            if (!enough_in_order)
+                continue;
+
+            new_folio = folio_alloc(GFP_HIGHUSER | __GFP_ZERO, order);
+
+            // If the allocation was unsuccsessful, try again with the next order,
+            // otherwise, use this new folio
+            if (new_folio)
+                break;
+        }
+
+        // If a folio could not be allocated, clean up and return an error
+        if (!new_folio)
+            goto err;
+
+        region = kzalloc(sizeof(struct contigmmfs_contig_alloc), GFP_KERNEL);
+        if (!region)
+            goto err;
+
+        folio_size = folio_nr_pages(new_folio);
+        region->va_start = current_va;
+        region->va_end = current_va + (folio_size << PAGE_SHIFT);
+        region->folio = new_folio;
+
+        if(mtree_store(&inode_info->mt, current_va, region, GFP_KERNEL))
+            goto err;
+
+        // TODO: It would probably be good to setup the page tables here,
+        // but it's easier if we just let the page fault handler to 90% of the
+        // work then do the rest in the page fault callback
+
+        pages_to_alloc -= folio_size;
+        current_va += folio_size << PAGE_SHIFT;
+        sbi->num_pages += folio_size;
+    }
+
     file_accessed(file);
     vma->vm_ops = &contigmmfs_vm_ops;
     vma->vm_flags |= VM_MIXEDMAP;
 
     return 0;
+err:
+    if (region)
+        kfree(region);
+    if (new_folio)
+        folio_put(new_folio);
+
+    return -ENOMEM;
 }
 
 static long contigmmfs_fallocate(struct file *file, int mode, loff_t offset, loff_t len)
@@ -217,8 +335,6 @@ static int contigmmfs_fill_super(struct super_block *sb, struct fs_context *fc)
     sb->s_blocksize = PAGE_SIZE;
     sb->s_blocksize_bits = PAGE_SHIFT;
 
-    spin_lock_init(&sbi->lock);
-    INIT_LIST_HEAD(&sbi->active_list);
     sbi->num_pages = 0;
 
     inode = contigmmfs_get_inode(sb, NULL, S_IFDIR | 0755, 0);

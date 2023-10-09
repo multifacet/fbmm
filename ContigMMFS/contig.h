@@ -8,13 +8,19 @@
 #include <linux/sched.h>
 
 struct contigmmfs_sb_info {
-    spinlock_t lock;
-    struct list_head active_list;
     u64 num_pages;
 };
 
+// A file is composed of a series of contiguous sets of pages
+// This struct has the virtual address range of this contiguous set.
+struct contigmmfs_contig_alloc {
+    u64 va_start;
+    u64 va_end;
+    struct folio *folio;
+    struct list_head *node;
+};
+
 struct contigmmfs_inode_info {
-    // Maple tree mapping the page offset to the folio mapped to that offset
     struct maple_tree mt;
 };
 #endif //CONTIG_MMFS_H
