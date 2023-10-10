@@ -137,6 +137,9 @@ static int contigmmfs_mmap(struct file *file, struct vm_area_struct *vma)
         region->va_start = current_va;
         region->va_end = current_va + (folio_size << PAGE_SHIFT);
         region->folio = new_folio;
+        // We are mapping it per base page, so we need to get it that many times
+        for (int i = 0; i < folio_size; i++)
+            folio_get(region->folio);
 
         if(mtree_store(&inode_info->mt, current_va, region, GFP_KERNEL))
             goto err;
@@ -308,9 +311,17 @@ static int contigmmfs_statfs(struct dentry *dentry, struct kstatfs *buf)
 
 static void contigmmfs_free_inode(struct inode *inode)
 {
+    struct contigmmfs_sb_info *sbi = CMMFS_SB(inode->i_sb);
     struct contigmmfs_inode_info *inode_info = CMMFS_I(inode);
+    struct contigmmfs_contig_alloc *region;
+    unsigned long index = 0;
 
-    //TODO
+    // Release all of the pages associated with the file
+    mt_for_each(&inode_info->mt, region, index, ULONG_MAX) {
+        sbi->num_pages -= folio_nr_pages(region->folio);
+        folio_put(region->folio);
+        kfree(region);
+    }
 
     mtree_destroy(&inode_info->mt);
     kfree(inode_info);
