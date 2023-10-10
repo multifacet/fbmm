@@ -301,7 +301,7 @@ static int contigmmfs_statfs(struct dentry *dentry, struct kstatfs *buf)
     buf->f_type = sb->s_magic;
     buf->f_bsize = PAGE_SIZE;
     buf->f_blocks = sbi->num_pages;
-    buf->f_bfree = buf->f_bavail = sbi->num_pages;
+    buf->f_bfree = buf->f_bavail = 0;
     buf->f_files = LONG_MAX;
     buf->f_ffree = LONG_MAX;
     buf->f_namelen = 255;
