@@ -46,6 +46,9 @@
 #define CREATE_TRACE_POINTS
 #include <trace/events/thp.h>
 
+extern inline pmd_t pmd_mkreserve(pmd_t pmd);
+extern inline pte_t pte_mkreserve(pte_t pte);
+
 /*
  * By default, transparent hugepage support is disabled in order to avoid
  * risking an increased memory footprint for applications that are not
@@ -706,6 +709,11 @@ static vm_fault_t __do_huge_pmd_anonymous_page(struct vm_fault *vmf,
 		page_add_new_anon_rmap(page, vma, haddr);
 		lru_cache_add_inactive_or_unevictable(page, vma);
 		pgtable_trans_huge_deposit(vma->vm_mm, vmf->pmd, pgtable);
+		/* Make the page table entry as reserved for TLB miss tracking */
+		if(vma->vm_mm && (vma->vm_mm->badger_trap_en==1) && (!(vmf->flags & FAULT_FLAG_INSTRUCTION)))
+		{
+			entry = pmd_mkreserve(entry);
+		}
 		set_pmd_at(vma->vm_mm, haddr, vmf->pmd, entry);
 		update_mmu_cache_pmd(vma, vmf->address, vmf->pmd);
 		add_mm_counter(vma->vm_mm, MM_ANONPAGES, HPAGE_PMD_NR);
@@ -772,6 +780,14 @@ static void set_huge_zero_page(pgtable_t pgtable, struct mm_struct *mm,
 	entry = mk_pmd(zero_page, vma->vm_page_prot);
 	entry = pmd_mkhuge(entry);
 	pgtable_trans_huge_deposit(mm, pmd, pgtable);
+	/* Make the page table entry as reserved for TLB miss tracking 
+	 * No need to worry for zero page with instruction faults.
+	 * Instruction faults will never reach here.
+	 */
+	if(mm && (mm->badger_trap_en==1))
+	{
+		entry = pmd_mkreserve(entry);
+	}
 	set_pmd_at(mm, haddr, pmd, entry);
 	mm_inc_nr_ptes(mm);
 }
@@ -1378,6 +1394,11 @@ reuse:
 		}
 		entry = pmd_mkyoung(orig_pmd);
 		entry = maybe_pmd_mkwrite(pmd_mkdirty(entry), vma);
+		/* Make the page table entry as reserved for TLB miss tracking */
+		if(vma->vm_mm && (vma->vm_mm->badger_trap_en==1) && (!(vmf->flags & FAULT_FLAG_INSTRUCTION)))
+		{
+			entry = pmd_mkreserve(entry);
+		}
 		if (pmdp_set_access_flags(vma, haddr, vmf->pmd, entry, 1))
 			update_mmu_cache_pmd(vma, vmf->address, vmf->pmd);
 		spin_unlock(vmf->ptl);
@@ -2265,6 +2286,11 @@ static void __split_huge_pmd_locked(struct vm_area_struct *vma, pmd_t *pmd,
 		}
 		pte = pte_offset_map(&_pmd, addr);
 		BUG_ON(!pte_none(*pte));
+		/* Make the page table entry as reserved for TLB miss tracking */
+		if(mm && (mm->badger_trap_en==1))
+		{
+			entry = pte_mkreserve(entry);
+		}
 		set_pte_at(mm, addr, pte, entry);
 		pte_unmap(pte);
 	}

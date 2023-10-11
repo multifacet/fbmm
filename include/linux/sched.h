@@ -1528,6 +1528,10 @@ struct task_struct {
 	 */
 	randomized_struct_fields_end
 
+	unsigned long total_dtlb_misses;
+	unsigned long total_dtlb_4k_misses;
+	unsigned long total_dtlb_hugetlb_misses;
+
 	/* CPU-specific state of this task: */
 	struct thread_struct		thread;
 

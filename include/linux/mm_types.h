@@ -804,10 +804,19 @@ struct mm_struct {
 	} __randomize_layout;
 
 	/*
+	 * Variables for Badger Trap
+	 */
+	unsigned int badger_trap_en;
+	unsigned long total_dtlb_misses;
+	unsigned long total_dtlb_4k_misses;
+	unsigned long total_dtlb_hugetlb_misses;
+
+	/*
 	 * The mm_cpumask needs to be at the end of mm_struct, because it
 	 * is dynamically sized based on nr_cpu_ids.
 	 */
 	unsigned long cpu_bitmap[];
+
 };
 
 #define MM_MT_FLAGS	(MT_FLAGS_ALLOC_RANGE | MT_FLAGS_LOCK_EXTERN)
