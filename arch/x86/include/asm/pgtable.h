@@ -188,6 +188,7 @@ static inline unsigned long pte_pfn(pte_t pte)
 {
 	phys_addr_t pfn = pte_val(pte);
 	pfn ^= protnone_mask(pfn);
+	pfn &= ~(_AT(pteval_t, 1) << 51);
 	return (pfn & PTE_PFN_MASK) >> PAGE_SHIFT;
 }
 

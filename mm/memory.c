@@ -4971,46 +4971,6 @@ static vm_fault_t handle_pte_fault(struct vm_fault *vmf)
 	struct mm_struct *mm = vma->vm_mm;
 	pte_t* page_table;
 
-	if(mm && mm->badger_trap_en && (vmf->flags & FAULT_FLAG_INSTRUCTION))
-	{
-                if(is_pte_reserved(*vmf->pte))
-                        *vmf->pte = pte_unreserve(*vmf->pte);
-	}
-
-	/* We need to figure out if the page fault is a fake page fault or not.
- 	 * If it is a fake page fault, we need to handle it specially. It has to
- 	 * be made sure that the special page fault is not on instruction fault.
- 	 * Our technique cannot not handle instruction page fault yet.
- 	 *
- 	 * We can have two cases when we have a fake page fault:
- 	 * 1. We have taken a fake page fault on a COW page. A 
- 	 * 	fake page fault on a COW page if for reading only
- 	 * 	has to be considered a normal fake page fault. But
- 	 * 	for writing purposes need to be handled correctly.
- 	 * 2. We have taken a fake page fault on a normal page.
- 	 */
-	if(mm && mm->badger_trap_en && (!(vmf->flags & FAULT_FLAG_INSTRUCTION)) && pte_present(*vmf->pte))
-	{
-		page_table = pte_offset_map_lock(mm, vmf->pmd, vmf->address, &vmf->ptl);
-		entry = *page_table;
-		if((vmf->flags & FAULT_FLAG_WRITE) && is_pte_reserved(entry) && !pte_write(entry))
-		{
-			pte_unmap_unlock(page_table, vmf->ptl);
-			vmf->ptl = pte_lockptr(mm,vmf->pmd);
-			spin_lock(vmf->ptl);
-			entry = *vmf->pte;
-			return do_wp_page(vmf);
-		}
-		else if(is_pte_reserved(entry))
-		{
-			return do_fake_page_fault(mm, vmf->vma, vmf->address,
-						 page_table, vmf->pmd, vmf->flags, vmf->ptl);
-		}
-
-		*page_table = pte_mkreserve(*page_table);
-		pte_unmap_unlock(page_table, vmf->ptl);
-	}
-
 	if (unlikely(pmd_none(*vmf->pmd))) {
 		/*
 		 * Leave __pte_alloc() until later: because vm_ops->fault may
@@ -5065,6 +5025,46 @@ static vm_fault_t handle_pte_fault(struct vm_fault *vmf)
 			return do_anonymous_page(vmf);
 		else
 			return do_fault(vmf);
+	}
+
+	if(mm && mm->badger_trap_en && (vmf->flags & FAULT_FLAG_INSTRUCTION))
+	{
+                if(is_pte_reserved(*vmf->pte))
+                        *vmf->pte = pte_unreserve(*vmf->pte);
+	}
+
+	/* We need to figure out if the page fault is a fake page fault or not.
+ 	 * If it is a fake page fault, we need to handle it specially. It has to
+ 	 * be made sure that the special page fault is not on instruction fault.
+ 	 * Our technique cannot not handle instruction page fault yet.
+ 	 *
+ 	 * We can have two cases when we have a fake page fault:
+ 	 * 1. We have taken a fake page fault on a COW page. A 
+ 	 * 	fake page fault on a COW page if for reading only
+ 	 * 	has to be considered a normal fake page fault. But
+ 	 * 	for writing purposes need to be handled correctly.
+ 	 * 2. We have taken a fake page fault on a normal page.
+ 	 */
+	if(mm && mm->badger_trap_en && (!(vmf->flags & FAULT_FLAG_INSTRUCTION)) && pte_present(*vmf->pte))
+	{
+		page_table = pte_offset_map_lock(mm, vmf->pmd, vmf->address, &vmf->ptl);
+		entry = *page_table;
+		if((vmf->flags & FAULT_FLAG_WRITE) && is_pte_reserved(entry) && !pte_write(entry))
+		{
+			pte_unmap_unlock(page_table, vmf->ptl);
+			vmf->ptl = pte_lockptr(mm,vmf->pmd);
+			spin_lock(vmf->ptl);
+			entry = *vmf->pte;
+			return do_wp_page(vmf);
+		}
+		else if(is_pte_reserved(entry))
+		{
+			return do_fake_page_fault(mm, vmf->vma, vmf->address,
+						 page_table, vmf->pmd, vmf->flags, vmf->ptl);
+		}
+
+		*page_table = pte_mkreserve(*page_table);
+		pte_unmap_unlock(page_table, vmf->ptl);
 	}
 
 	if (!pte_present(vmf->orig_pte))
