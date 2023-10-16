@@ -41,20 +41,21 @@ static vm_fault_t contigmmfs_fault(struct vm_fault *vmf)
 
     // Get the contiguous region that this fault belongs to
     region = mt_prev(&inode_info->mt, vmf->address + 1, 0);
-    //pr_err("region %px\n", region);
     if (!region || region->va_start > vmf->address || region->va_end <= vmf->address)
         return VM_FAULT_OOM;
 
     page = folio_page(region->folio, ((vmf->address - region->va_start) >> PAGE_SHIFT));
-    vmf->page = page;
 
     // For now, do nothing if the pte already exists
     if (vmf->pte) {
+        vmf->page = page;
+        vmf->orig_pte = *vmf->pte;
         return 0;
     }
 
     if (pte_alloc(vma->vm_mm, vmf->pmd))
         return VM_FAULT_OOM;
+
     vmf->pte = pte_offset_map_lock(vma->vm_mm, vmf->pmd, vmf->address, &vmf->ptl);
     if (!pte_none(*vmf->pte)) {
         goto unlock;
@@ -73,7 +74,7 @@ static vm_fault_t contigmmfs_fault(struct vm_fault *vmf)
 
 unlock:
     pte_unmap_unlock(vmf->pte, vmf->ptl);
-    return 0;
+    return VM_FAULT_NOPAGE;
 }
 
 static struct vm_operations_struct contigmmfs_vm_ops = {
@@ -137,9 +138,6 @@ static int contigmmfs_mmap(struct file *file, struct vm_area_struct *vma)
         region->va_start = current_va;
         region->va_end = current_va + (folio_size << PAGE_SHIFT);
         region->folio = new_folio;
-        // We are mapping it per base page, so we need to get it that many times
-        for (int i = 0; i < folio_size; i++)
-            folio_get(region->folio);
 
         if(mtree_store(&inode_info->mt, current_va, region, GFP_KERNEL))
             goto err;
