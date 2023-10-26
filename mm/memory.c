@@ -4141,7 +4141,7 @@ static vm_fault_t do_anonymous_page(struct vm_fault *vmf)
 	lru_cache_add_inactive_or_unevictable(page, vma);
 setpte:
 	/* Make the page table entry as reserved for TLB miss tracking */
-	if(vma->vm_mm && (vma->vm_mm->badger_trap_en==1) && (!(vmf->flags & FAULT_FLAG_INSTRUCTION)))
+	if(vma->vm_mm && (vma->vm_mm->badger_trap_en==1) && (!(vmf->flags & FAULT_FLAG_INSTRUCTION)) && !pte_none(entry))
 	{
 		entry = pte_mkreserve(entry);
 	}
@@ -4219,8 +4219,10 @@ static vm_fault_t __do_fault(struct vm_fault *vmf)
 	if(vma->vm_mm && (vma->vm_mm->badger_trap_en==1) && (!(vmf->flags & FAULT_FLAG_INSTRUCTION))) {
 		ptep = pte_offset_map_lock(vma->vm_mm, vmf->pmd, vmf->address, &vmf->ptl);
 		entry = *ptep;
-		entry = pte_mkreserve(entry);
-		set_pte_at(vma->vm_mm, vmf->address, ptep, entry);
+		if (!pte_none(entry)) {
+			entry = pte_mkreserve(entry);
+			set_pte_at(vma->vm_mm, vmf->address, ptep, entry);
+		}
     	pte_unmap_unlock(ptep, vmf->ptl);
 	}
 
