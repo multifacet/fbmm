@@ -48,9 +48,7 @@ static vm_fault_t contigmmfs_fault(struct vm_fault *vmf)
 
     // For now, do nothing if the pte already exists
     if (vmf->pte) {
-        vmf->page = page;
-        vmf->orig_pte = *vmf->pte;
-        return 0;
+        return VM_FAULT_NOPAGE;
     }
 
     if (pte_alloc(vma->vm_mm, vmf->pmd))
@@ -69,6 +67,7 @@ static vm_fault_t contigmmfs_fault(struct vm_fault *vmf)
     }
 
     page_add_file_rmap(page, vma, false);
+    percpu_counter_inc(&vma->vm_mm->rss_stat[MM_FILEPAGES]);
     set_pte_at(vma->vm_mm, vmf->address, vmf->pte, entry);
     folio_get(region->folio);
 
@@ -92,6 +91,7 @@ static int contigmmfs_mmap(struct file *file, struct vm_area_struct *vma)
     struct contigmmfs_inode_info *inode_info = CMMFS_I(inode);
     struct contigmmfs_sb_info *sbi = CMMFS_SB(inode->i_sb);
     struct contigmmfs_contig_alloc *region = NULL;
+    struct range_tlb_entry *tlb_entry = NULL;
     struct folio *new_folio = NULL;
     u64 pages_to_alloc = (vma->vm_end - vma->vm_start) >> PAGE_SHIFT;
     u64 current_va = vma->vm_start;
@@ -142,6 +142,18 @@ static int contigmmfs_mmap(struct file *file, struct vm_area_struct *vma)
         if(mtree_store(&inode_info->mt, current_va, region, GFP_KERNEL))
             goto err;
 
+        // If badger trap is being used, add the ranges to the mm's list
+        if (vma->vm_mm && vma->vm_mm->badger_trap_en && folio_size >= 8) {
+            tlb_entry = kzalloc(sizeof(struct range_tlb_entry), GFP_KERNEL);
+            // I'm being lazy here without the error checking, but it's
+            // *probably* fine
+            tlb_entry->range_start = region->va_start;
+            tlb_entry->range_end = region->va_end;
+            spin_lock(&vma->vm_mm->range_tlb_lock);
+            mtree_store(&vma->vm_mm->all_ranges, tlb_entry->range_start, tlb_entry, GFP_KERNEL);
+            spin_unlock(&vma->vm_mm->range_tlb_lock);
+        }
+
         // TODO: It would probably be good to setup the page tables here,
         // but it's easier if we just let the page fault handler to 90% of the
         // work then do the rest in the page fault callback
@@ -167,7 +179,7 @@ err:
 
 static long contigmmfs_fallocate(struct file *file, int mode, loff_t offset, loff_t len)
 {
-    return -EOPNOTSUPP;
+    return 0;
 }
 
 const struct file_operations contigmmfs_file_operations = {

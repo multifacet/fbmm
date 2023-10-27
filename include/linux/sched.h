@@ -1531,6 +1531,7 @@ struct task_struct {
 	unsigned long total_dtlb_misses;
 	unsigned long total_dtlb_4k_misses;
 	unsigned long total_dtlb_hugetlb_misses;
+	unsigned long total_range_tlb_hits;
 
 	/* CPU-specific state of this task: */
 	struct thread_struct		thread;

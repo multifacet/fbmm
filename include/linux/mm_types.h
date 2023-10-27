@@ -598,6 +598,14 @@ struct vm_area_struct {
 } __randomize_layout;
 
 struct kioctx_table;
+
+#define MAX_RANGE_TLB_ENTRIES 32
+struct range_tlb_entry {
+	u64 range_start;
+	u64 range_end;
+	struct list_head node;
+};
+
 struct mm_struct {
 	struct {
 		struct maple_tree mm_mt;
@@ -810,6 +818,11 @@ struct mm_struct {
 	unsigned long total_dtlb_misses;
 	unsigned long total_dtlb_4k_misses;
 	unsigned long total_dtlb_hugetlb_misses;
+	unsigned long total_range_tlb_hits;
+	spinlock_t range_tlb_lock;
+	struct list_head range_tlb;
+	struct maple_tree all_ranges;
+	unsigned long range_tlb_size;
 
 	/*
 	 * The mm_cpumask needs to be at the end of mm_struct, because it

@@ -822,6 +822,7 @@ void __noreturn do_exit(long code)
 		current->mm->total_dtlb_misses+= current->total_dtlb_misses;
 		current->mm->total_dtlb_4k_misses+= current->total_dtlb_4k_misses;
 		current->mm->total_dtlb_hugetlb_misses+= current->total_dtlb_hugetlb_misses;
+		current->mm->total_range_tlb_hits += current->total_range_tlb_hits;
 		mutex_unlock(&result_mutex);
 	}
 
@@ -833,6 +834,7 @@ void __noreturn do_exit(long code)
 			current->real_parent->mm->total_dtlb_misses+=current->mm->total_dtlb_misses;
 			current->real_parent->mm->total_dtlb_4k_misses+=current->mm->total_dtlb_4k_misses;
 			current->real_parent->mm->total_dtlb_hugetlb_misses+=current->mm->total_dtlb_hugetlb_misses;
+			current->real_parent->mm->total_range_tlb_hits += current->mm->total_range_tlb_hits;
 			mutex_unlock(&result_mutex);
 		}
 		else
@@ -842,6 +844,7 @@ void __noreturn do_exit(long code)
 			printk("DTLB miss detected %lu\n",current->mm->total_dtlb_misses);
 			printk("DTLB miss for 4KB page detected %lu\n",current->mm->total_dtlb_4k_misses);
 			printk("DTLB miss for hugepage detected %lu\n",current->mm->total_dtlb_hugetlb_misses);
+			printk("Range TLB hit detected %lu\n", current->mm->total_range_tlb_hits);
 			printk("===================================\n");
 		}
 	}

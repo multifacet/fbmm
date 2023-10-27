@@ -1168,6 +1168,12 @@ static struct mm_struct *mm_init(struct mm_struct *mm, struct task_struct *p,
 		if (percpu_counter_init(&mm->rss_stat[i], 0, GFP_KERNEL_ACCOUNT))
 			goto fail_pcpu;
 
+	// Bijan: This is for badger trap with the ContigMMFS
+	spin_lock_init(&mm->range_tlb_lock);
+	INIT_LIST_HEAD(&mm->range_tlb);
+	mt_init(&mm->all_ranges);
+	mm->range_tlb_size = 0;
+
 	mm->user_ns = get_user_ns(user_ns);
 	lru_gen_init_mm(mm);
 	return mm;
@@ -1199,6 +1205,8 @@ struct mm_struct *mm_alloc(void)
 
 static inline void __mmput(struct mm_struct *mm)
 {
+	struct range_tlb_entry *tlb_entry;
+	unsigned long index = 0;
 	VM_BUG_ON(atomic_read(&mm->mm_users));
 
 	uprobe_clear_state(mm);
@@ -1216,6 +1224,12 @@ static inline void __mmput(struct mm_struct *mm)
 	if (mm->binfmt)
 		module_put(mm->binfmt->module);
 	lru_gen_del_mm(mm);
+
+	mt_for_each(&mm->all_ranges, tlb_entry, index, ULONG_MAX) {
+		kfree(tlb_entry);
+	}
+	mtree_destroy(&mm->all_ranges);
+
 	mmdrop(mm);
 }
 

@@ -4194,7 +4194,9 @@ static vm_fault_t __do_fault(struct vm_fault *vmf)
 	}
 
 	ret = vma->vm_ops->fault(vmf);
-	if (unlikely(ret & (VM_FAULT_ERROR | VM_FAULT_NOPAGE | VM_FAULT_RETRY |
+	if (unlikely(ret & VM_FAULT_NOPAGE))
+		goto badger_trap;
+	else if (unlikely(ret & (VM_FAULT_ERROR | VM_FAULT_NOPAGE | VM_FAULT_RETRY |
 			    VM_FAULT_DONE_COW)))
 		return ret;
 
@@ -4215,6 +4217,7 @@ static vm_fault_t __do_fault(struct vm_fault *vmf)
 		return poisonret;
 	}
 
+badger_trap:
 	/* Make the page table entry as reserved for TLB miss tracking */
 	if(vma->vm_mm && (vma->vm_mm->badger_trap_en==1) && (!(vmf->flags & FAULT_FLAG_INSTRUCTION))) {
 		ptep = pte_offset_map_lock(vma->vm_mm, vmf->pmd, vmf->address, &vmf->ptl);
@@ -4226,10 +4229,12 @@ static vm_fault_t __do_fault(struct vm_fault *vmf)
     	pte_unmap_unlock(ptep, vmf->ptl);
 	}
 
-	if (unlikely(!(ret & VM_FAULT_LOCKED)))
-		lock_page(vmf->page);
-	else
-		VM_BUG_ON_PAGE(!PageLocked(vmf->page), vmf->page);
+	if (!(ret & VM_FAULT_NOPAGE)) {
+		if (unlikely(!(ret & VM_FAULT_LOCKED)))
+			lock_page(vmf->page);
+		else
+			VM_BUG_ON_PAGE(!PageLocked(vmf->page), vmf->page);
+	}
 
 	return ret;
 }
@@ -4910,6 +4915,8 @@ static int do_fake_page_fault(struct mm_struct *mm, struct vm_area_struct *vma,
 {
         unsigned long *touch_page_addr;
         unsigned long touched;
+	struct range_tlb_entry *tlb_entry, *tmp;
+	bool range_tlb_hit = false;
 	unsigned long ret;
 	static unsigned int consecutive = 0;
 	static unsigned long prev_address = 0;
@@ -4944,6 +4951,35 @@ static int do_fake_page_fault(struct mm_struct *mm, struct vm_area_struct *vma,
 	/* Here where we do all our analysis */
 	current->total_dtlb_4k_misses++;
 	current->total_dtlb_misses++;
+
+	// Check for range tlb stuff
+	spin_lock(&mm->range_tlb_lock);
+	list_for_each_entry_safe(tlb_entry, tmp, &mm->range_tlb, node) {
+		if (tlb_entry->range_start <= address && address < tlb_entry->range_end) {
+			current->total_range_tlb_hits++;
+
+			// Move this range to the head of the list, to simulate LRU eviction
+			list_del(&tlb_entry->node);
+			list_add(&tlb_entry->node, &mm->range_tlb);
+
+			range_tlb_hit = true;
+			break;
+		}
+	}
+
+	// If we didn't hit in the range tlb, see if the range exists at all
+	if (!range_tlb_hit) {
+		tlb_entry = mt_prev(&mm->all_ranges, address + 1, 0);
+		if (tlb_entry && tlb_entry->range_start <= address && address < tlb_entry->range_end) {
+			// Evict the LRU entry if the tlb is full and insert the new one into the range tlb
+			if (mm->range_tlb_size >= MAX_RANGE_TLB_ENTRIES)
+				list_del(mm->range_tlb.prev);
+			else
+				mm->range_tlb_size++;
+			list_add(&tlb_entry->node, &mm->range_tlb);
+		}
+	}
+	spin_unlock(&mm->range_tlb_lock);
 
 	*page_table = pte_mkreserve(*page_table);
 	pte_unmap_unlock(page_table, ptl);
