@@ -475,6 +475,24 @@ void fbmm_check_exiting_proc(pid_t pid) {
 		vfree(buf);
 }
 
+// Make the default mmfs dir of the dst the same as src
+int fbmm_copy_mnt_dir(pid_t src, pid_t dst) {
+	char *buffer;
+	char *mt_entry;
+	size_t len;
+
+	// Does the src actually have a default mnt dir
+	mt_entry = mtree_load(&fbmm_proc_mnt_dirs, src);
+	if (!mt_entry)
+		return -1;
+
+	len = strnlen(mt_entry, PATH_MAX);
+	buffer = vmalloc(PATH_MAX + 1);
+	strncpy(buffer, mt_entry, len);
+
+	return mtree_store(&fbmm_proc_mnt_dirs, dst, buffer, GFP_KERNEL);
+}
+
 ///////////////////////////////////////////////////////////////////////////////
 // sysfs files
 static ssize_t fbmm_state_show(struct kobject *kobj,

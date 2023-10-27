@@ -97,6 +97,7 @@
 #include <linux/io_uring.h>
 #include <linux/bpf.h>
 #include <linux/stackprotector.h>
+#include <linux/file_based_mm.h>
 
 #include <asm/pgalloc.h>
 #include <linux/uaccess.h>
@@ -2709,6 +2710,11 @@ pid_t kernel_clone(struct kernel_clone_args *args)
 		task_unlock(p);
 	}
 
+	if (use_file_based_mm(current->tgid)) {
+		if (fbmm_copy_mnt_dir(current->tgid, p->tgid)) {
+			pr_err("Failed to copy fbmm mnt dir from %d to %d\n", current->tgid, p->tgid);
+		}
+	}
 	wake_up_new_task(p);
 
 	/* forking complete and child started to run, tell ptracer */

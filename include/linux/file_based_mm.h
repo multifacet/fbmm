@@ -15,6 +15,7 @@ void fbmm_register_file(pid_t pid, struct file *f, unsigned long start,
 		unsigned long len);
 int fbmm_munmap(pid_t pid, unsigned long start, unsigned long len);
 void fbmm_check_exiting_proc(pid_t pid);
+int fbmm_copy_mnt_dir(pid_t src, pid_t dst);
 
 #else //CONFIG_FILE_BASED_MM
 
@@ -35,6 +36,10 @@ inline int fbmm_munmap(pid_t pid, unsigned long start, unsigned long len) {
 }
 
 inline void fbmm_check_exiting_proc(pid_t pid) {}
+
+int fbmm_copy_mnt_dir(pid_t src, pid_t dst) {
+	return 0;
+}
 
 #endif //CONFIG_FILE_BASED_MM
 
