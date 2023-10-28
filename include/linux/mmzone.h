@@ -25,7 +25,7 @@
 
 /* Free memory management - zoned buddy allocator.  */
 #ifndef CONFIG_ARCH_FORCE_MAX_ORDER
-#define MAX_ORDER 11
+#define MAX_ORDER 18
 #else
 #define MAX_ORDER CONFIG_ARCH_FORCE_MAX_ORDER
 #endif
