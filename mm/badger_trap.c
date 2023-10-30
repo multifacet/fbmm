@@ -99,6 +99,7 @@ inline pte_t pte_mkreserve(pte_t pte)
 {
         return pte_set_flags(pte, PTE_RESERVED_MASK);
 }
+EXPORT_SYMBOL(pte_mkreserve);
 
 inline pte_t pte_unreserve(pte_t pte)
 {

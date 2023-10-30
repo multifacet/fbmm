@@ -10,6 +10,7 @@
 #include <linux/rmap.h>
 #include <linux/string.h>
 #include <linux/falloc.h>
+#include <linux/badger_trap.h>
 
 #include "contig.h"
 
@@ -64,6 +65,10 @@ static vm_fault_t contigmmfs_fault(struct vm_fault *vmf)
     entry = pte_mkyoung(entry);
     if (vma->vm_flags & VM_WRITE) {
         entry = pte_mkwrite(pte_mkdirty(entry));
+    }
+
+	if(vma->vm_mm && (vma->vm_mm->badger_trap_en==1) && (!(vmf->flags & FAULT_FLAG_INSTRUCTION))) {
+        entry = pte_mkreserve(entry);
     }
 
     page_add_file_rmap(page, vma, false);

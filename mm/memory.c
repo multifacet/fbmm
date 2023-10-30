@@ -4141,7 +4141,7 @@ static vm_fault_t do_anonymous_page(struct vm_fault *vmf)
 	lru_cache_add_inactive_or_unevictable(page, vma);
 setpte:
 	/* Make the page table entry as reserved for TLB miss tracking */
-	if(vma->vm_mm && (vma->vm_mm->badger_trap_en==1) && (!(vmf->flags & FAULT_FLAG_INSTRUCTION)) && !pte_none(entry))
+	if(vma->vm_mm && (vma->vm_mm->badger_trap_en==1) && (!(vmf->flags & FAULT_FLAG_INSTRUCTION)))
 	{
 		entry = pte_mkreserve(entry);
 	}
@@ -4170,7 +4170,6 @@ static vm_fault_t __do_fault(struct vm_fault *vmf)
 {
 	struct vm_area_struct *vma = vmf->vma;
 	vm_fault_t ret;
-	pte_t entry, *ptep;
 
 	/*
 	 * Preallocate pte before we take page_lock because this might lead to
@@ -4194,9 +4193,7 @@ static vm_fault_t __do_fault(struct vm_fault *vmf)
 	}
 
 	ret = vma->vm_ops->fault(vmf);
-	if (unlikely(ret & VM_FAULT_NOPAGE))
-		goto badger_trap;
-	else if (unlikely(ret & (VM_FAULT_ERROR | VM_FAULT_NOPAGE | VM_FAULT_RETRY |
+    if (unlikely(ret & (VM_FAULT_ERROR | VM_FAULT_NOPAGE | VM_FAULT_RETRY |
 			    VM_FAULT_DONE_COW)))
 		return ret;
 
@@ -4217,24 +4214,10 @@ static vm_fault_t __do_fault(struct vm_fault *vmf)
 		return poisonret;
 	}
 
-badger_trap:
-	/* Make the page table entry as reserved for TLB miss tracking */
-	if(vma->vm_mm && (vma->vm_mm->badger_trap_en==1) && (!(vmf->flags & FAULT_FLAG_INSTRUCTION))) {
-		ptep = pte_offset_map_lock(vma->vm_mm, vmf->pmd, vmf->address, &vmf->ptl);
-		entry = *ptep;
-		if (!pte_none(entry)) {
-			entry = pte_mkreserve(entry);
-			set_pte_at(vma->vm_mm, vmf->address, ptep, entry);
-		}
-    	pte_unmap_unlock(ptep, vmf->ptl);
-	}
-
-	if (!(ret & VM_FAULT_NOPAGE)) {
-		if (unlikely(!(ret & VM_FAULT_LOCKED)))
-			lock_page(vmf->page);
-		else
-			VM_BUG_ON_PAGE(!PageLocked(vmf->page), vmf->page);
-	}
+	if (unlikely(!(ret & VM_FAULT_LOCKED)))
+		lock_page(vmf->page);
+	else
+		VM_BUG_ON_PAGE(!PageLocked(vmf->page), vmf->page);
 
 	return ret;
 }
@@ -4386,6 +4369,7 @@ vm_fault_t finish_fault(struct vm_fault *vmf)
 	struct vm_area_struct *vma = vmf->vma;
 	struct page *page;
 	vm_fault_t ret;
+	pte_t entry;
 
 	/* Did we COW the page? */
 	if ((vmf->flags & FAULT_FLAG_WRITE) && !(vma->vm_flags & VM_SHARED))
@@ -4437,6 +4421,13 @@ vm_fault_t finish_fault(struct vm_fault *vmf)
 	} else {
 		update_mmu_tlb(vma, vmf->address, vmf->pte);
 		ret = VM_FAULT_NOPAGE;
+	}
+
+	/* Make the page table entry as reserved for TLB miss tracking */
+	if(vma->vm_mm && (vma->vm_mm->badger_trap_en==1) && (!(vmf->flags & FAULT_FLAG_INSTRUCTION))) {
+		entry = *vmf->pte;
+		entry = pte_mkreserve(entry);
+		set_pte_at(vma->vm_mm, vmf->address, vmf->pte, entry);
 	}
 
 	pte_unmap_unlock(vmf->pte, vmf->ptl);
