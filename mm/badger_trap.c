@@ -180,12 +180,14 @@ void badger_trap_init(struct mm_struct *mm)
 				if((pmd_flags(*pmd) & mask) != mask)
 					continue;
 				address = (i<<PGDIR_SHIFT) + (j<<PUD_SHIFT) + (k<<PMD_SHIFT);
+				mmap_read_lock(mm);
 				vma = find_vma(mm, address);
 				if(vma && pmd_huge(*pmd) && (hugepage_flags_enabled()||hugepage_flags_always()||vma->vm_flags & VM_HUGEPAGE||is_vm_hugetlb_page(vma)))
 				{
 					spin_lock(&mm->page_table_lock);
 					*pmd = pmd_mkreserve(*pmd);
 					spin_unlock(&mm->page_table_lock);
+					mmap_read_unlock(mm);
 					continue;
 				}
 				for(l=0; l<PTRS_PER_PTE; l++)
@@ -203,6 +205,7 @@ void badger_trap_init(struct mm_struct *mm)
 					}
 					user++;
 				}
+				mmap_read_unlock(mm);
 			}
 		}
 	}
