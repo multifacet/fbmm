@@ -4909,6 +4909,8 @@ static int do_fake_page_fault(struct mm_struct *mm, struct vm_area_struct *vma,
 	struct range_tlb_entry *tlb_entry, *tmp;
 	bool range_tlb_hit = false;
 	unsigned long ret;
+	pte_t entry = *page_table;
+	pte_t orig_entry = entry;
 	static unsigned int consecutive = 0;
 	static unsigned long prev_address = 0;
 
@@ -4920,24 +4922,28 @@ static int do_fake_page_fault(struct mm_struct *mm, struct vm_area_struct *vma,
 		prev_address = address;
 	}
 
-	if(consecutive > 1)
+	if(consecutive > 1 || !(pte_flags(entry) & _PAGE_PRESENT))
 	{
-		*page_table = pte_unreserve(*page_table);
+		entry = pte_unreserve(entry);
+		set_pte_at(mm, address & PAGE_MASK, page_table, entry);
 		pte_unmap_unlock(page_table, ptl);
 		return 0;
 	}
 
 	if(flags & FAULT_FLAG_WRITE)
-		*page_table = pte_mkdirty(*page_table);
+		entry = pte_mkdirty(entry);
 
-	*page_table = pte_mkyoung(*page_table);
-	*page_table = pte_unreserve(*page_table);
+	entry = pte_mkyoung(entry);
+	entry = pte_unreserve(entry);
+	set_pte_at(mm, address & PAGE_MASK, page_table, entry);
 
 	touch_page_addr = (void *)(address & PAGE_MASK);
 	ret = copy_from_user(&touched, (__force const void __user *)touch_page_addr, sizeof(unsigned long));
 
-	if(ret)
+	if(ret) {
+		pte_unmap_unlock(page_table, ptl);
 		return VM_FAULT_SIGBUS;
+	}
 
 	/* Here where we do all our analysis */
 	current->total_dtlb_4k_misses++;
@@ -4972,7 +4978,8 @@ static int do_fake_page_fault(struct mm_struct *mm, struct vm_area_struct *vma,
 	}
 	spin_unlock(&mm->range_tlb_lock);
 
-	*page_table = pte_mkreserve(*page_table);
+	entry = pte_mkreserve(entry);
+	set_pte_at(mm, address & PAGE_MASK, page_table, entry);
 	pte_unmap_unlock(page_table, ptl);
 
 	return 0;
@@ -5092,7 +5099,6 @@ static vm_fault_t handle_pte_fault(struct vm_fault *vmf)
 						 page_table, vmf->pmd, vmf->flags, vmf->ptl);
 		}
 
-		*page_table = pte_mkreserve(*page_table);
 		pte_unmap_unlock(page_table, vmf->ptl);
 	}
 
