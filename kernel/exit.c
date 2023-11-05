@@ -845,6 +845,7 @@ void __noreturn do_exit(long code)
 			printk("DTLB miss for 4KB page detected %lu\n",current->mm->total_dtlb_4k_misses);
 			printk("DTLB miss for hugepage detected %lu\n",current->mm->total_dtlb_hugetlb_misses);
 			printk("Range TLB hit detected %lu\n", current->mm->total_range_tlb_hits);
+			printk("Total TLB misses with RMM %lu\n", current->mm->total_dtlb_misses - current->mm->total_range_tlb_hits);
 			printk("===================================\n");
 		}
 	}
