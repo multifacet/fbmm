@@ -419,28 +419,31 @@ static void tieredmmfs_demote_one(struct tieredmmfs_sb_info *sbi, struct tieredm
     page = list_last_entry(&fast_dev->active_list, struct tieredmmfs_page, list);
     list_del(&page->list);
     fast_dev->active_pages--;
+    spin_unlock(&fast_dev->lock);
+
+    as = page->inode->i_mapping;
+    i_mmap_lock_read(as);
 
     // Figure out if the page is old or not
+    spin_lock(&fast_dev->lock);
     spin_lock(&page->lock);
 
     // Make sure the page is still mapped to a file
     if (!page->inode) {
         spin_unlock(&page->lock);
         spin_unlock(&fast_dev->lock);
+        i_mmap_unlock_read(as);
         return;
     }
-
-    as = page->inode->i_mapping;
-    i_mmap_lock_read(as);
 
     vma = vma_interval_tree_iter_first(&as->i_mmap, page->page_offset, page->page_offset);
     if (!vma) {
         list_add(&page->list, &fast_dev->active_list);
         fast_dev->active_pages++;
 
-        i_mmap_unlock_read(as);
         spin_unlock(&page->lock);
         spin_unlock(&fast_dev->lock);
+        i_mmap_unlock_read(as);
         return;
     }
     virt_addr = vma->vm_start
@@ -450,9 +453,9 @@ static void tieredmmfs_demote_one(struct tieredmmfs_sb_info *sbi, struct tieredm
         list_add(&page->list, &fast_dev->active_list);
         fast_dev->active_pages++;
 
-        i_mmap_unlock_read(as);
         spin_unlock(&page->lock);
         spin_unlock(&fast_dev->lock);
+        i_mmap_unlock_read(as);
         return;
     }
 
@@ -470,15 +473,15 @@ static void tieredmmfs_demote_one(struct tieredmmfs_sb_info *sbi, struct tieredm
         list_add(&page->list, &fast_dev->active_list);
         fast_dev->active_pages++;
 
-        i_mmap_unlock_read(as);
         spin_unlock(&page->lock);
         spin_unlock(&fast_dev->lock);
+        i_mmap_unlock_read(as);
         return;
     }
 
-    i_mmap_unlock_read(as);
     spin_unlock(&page->lock);
     spin_unlock(&fast_dev->lock);
+    i_mmap_unlock_read(as);
 
     spin_lock(&page->lock);
     // Make sure the page is still mapped to a file
@@ -532,28 +535,31 @@ static void tieredmmfs_promote_one(struct tieredmmfs_sb_info *sbi, struct tiered
     page = list_last_entry(&slow_dev->active_list, struct tieredmmfs_page, list);
     list_del(&page->list);
     slow_dev->active_pages--;
+    spin_unlock(&slow_dev->lock);
+
+    as = page->inode->i_mapping;
+    i_mmap_lock_read(as);
 
     // Figure out if the page is old or not
+    spin_lock(&slow_dev->lock);
     spin_lock(&page->lock);
 
     // Make sure the page is still mapped to a file
     if (!page->inode) {
         spin_unlock(&page->lock);
         spin_unlock(&slow_dev->lock);
+        i_mmap_unlock_read(as);
         return;
     }
-
-    as = page->inode->i_mapping;
-    i_mmap_lock_read(as);
 
     vma = vma_interval_tree_iter_first(&as->i_mmap, page->page_offset, page->page_offset);
     if (!vma) {
         list_add(&page->list, &slow_dev->active_list);
         slow_dev->active_pages++;
 
-        i_mmap_unlock_read(as);
         spin_unlock(&page->lock);
         spin_unlock(&slow_dev->lock);
+        i_mmap_unlock_read(as);
         return;
     }
     virt_addr = vma->vm_start
@@ -563,9 +569,9 @@ static void tieredmmfs_promote_one(struct tieredmmfs_sb_info *sbi, struct tiered
         list_add(&page->list, &slow_dev->active_list);
         slow_dev->active_pages++;
 
-        i_mmap_unlock_read(as);
         spin_unlock(&page->lock);
         spin_unlock(&slow_dev->lock);
+        i_mmap_unlock_read(as);
         return;
     }
 
@@ -583,15 +589,15 @@ static void tieredmmfs_promote_one(struct tieredmmfs_sb_info *sbi, struct tiered
         list_add(&page->list, &slow_dev->active_list);
         slow_dev->active_pages++;
 
-        i_mmap_unlock_read(as);
         spin_unlock(&page->lock);
         spin_unlock(&slow_dev->lock);
+        i_mmap_unlock_read(as);
         return;
     }
 
-    i_mmap_unlock_read(as);
     spin_unlock(&page->lock);
     spin_unlock(&slow_dev->lock);
+    i_mmap_unlock_read(as);
 
     spin_lock(&(*fast_page)->lock);
     spin_lock(&page->lock);
@@ -838,7 +844,67 @@ static vm_fault_t tieredmmfs_huge_fault(struct vm_fault *vmf, enum page_entry_si
 
 static vm_fault_t tieredmmfs_fault(struct vm_fault *vmf)
 {
-    return tieredmmfs_huge_fault(vmf, PE_SIZE_PTE);
+    struct vm_area_struct *vma = vmf->vma;
+    struct inode *inode = vma->vm_file->f_inode;
+    struct tieredmmfs_sb_info *sbi = FTFS_SB(inode->i_sb);
+    struct tieredmmfs_dev_info *dev;
+    struct tieredmmfs_inode_info *inode_info = FTFS_I(inode);
+    struct tieredmmfs_page *fs_page;
+    struct page *os_page;
+    pte_t entry;
+    u64 pfn;
+
+    read_lock(&inode_info->map_lock);
+    fs_page = tieredmmfs_find_page(&inode_info->page_maps, vmf->pgoff);
+
+    if (!fs_page) {
+        read_unlock(&inode_info->map_lock);
+
+        fs_page = tieredmmfs_alloc_page(inode, sbi, vmf->pgoff);
+        if (!fs_page) {
+            return -ENOMEM;
+        }
+
+        // Save this new mapping
+        write_lock(&inode_info->map_lock);
+        if (!tieredmmfs_insert_page(&inode_info->page_maps, fs_page)) {
+            BUG();
+        }
+
+        write_unlock(&inode_info->map_lock);
+    } else {
+        read_unlock(&inode_info->map_lock);
+    }
+    // This is for huge pages, always 1 here.
+    fs_page->num_base_pages = 1;
+
+    dev = &sbi->mem[fs_page->type];
+
+    if (!vmf->pte) {
+        if (pte_alloc(vma->vm_mm, vmf->pmd))
+            return VM_FAULT_OOM;
+    }
+
+    vmf->pte = pte_offset_map_lock(vma->vm_mm, vmf->pmd, vmf->address, &vmf->ptl);
+    if (!pte_none(*vmf->pte)) {
+        goto unlock;
+    }
+
+    // Construct the pte entry
+    pfn = dev->pfn.val + fs_page->page_num;
+    os_page = pfn_to_page(pfn);
+    entry = mk_pte(os_page, vma->vm_page_prot);
+    entry = pte_mkyoung(entry);
+    if (vma->vm_flags & VM_WRITE) {
+        entry = pte_mkwrite(pte_mkdirty(entry));
+    }
+
+//    page_add_file_rmap(page, vma, false);
+    percpu_counter_inc(&vma->vm_mm->rss_stat[MM_FILEPAGES]);
+    set_pte_at(vma->vm_mm, vmf->address, vmf->pte, entry);
+unlock:
+	pte_unmap_unlock(vmf->pte, vmf->ptl);
+    return VM_FAULT_NOPAGE;
 }
 
 static struct vm_operations_struct tieredmmfs_vm_ops = {
