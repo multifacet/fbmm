@@ -1173,6 +1173,10 @@ static struct mm_struct *mm_init(struct mm_struct *mm, struct task_struct *p,
 	INIT_LIST_HEAD(&mm->range_tlb);
 	mt_init(&mm->all_ranges);
 	mm->range_tlb_size = 0;
+	mm->total_dtlb_misses = 0;
+	mm->total_dtlb_4k_misses = 0;
+	mm->total_dtlb_hugetlb_misses = 0;
+	mm->total_range_tlb_hits = 0;
 
 	mm->user_ns = get_user_ns(user_ns);
 	lru_gen_init_mm(mm);
@@ -2724,6 +2728,11 @@ pid_t kernel_clone(struct kernel_clone_args *args)
 		task_unlock(p);
 	}
 
+	// Bijan: Make sure the badger trap numbers are clear
+	p->total_dtlb_misses = 0;
+	p->total_dtlb_4k_misses = 0;
+	p->total_dtlb_hugetlb_misses = 0;
+	// Copy the default fbmm mount dir on fork
 	if (use_file_based_mm(current->tgid)) {
 		if (fbmm_copy_mnt_dir(current->tgid, p->tgid)) {
 			pr_err("Failed to copy fbmm mnt dir from %d to %d\n", current->tgid, p->tgid);
