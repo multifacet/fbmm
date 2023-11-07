@@ -1026,7 +1026,7 @@ static int tieredmmfs_statfs(struct dentry *dentry, struct kstatfs *buf)
     buf->f_type = sb->s_magic;
     buf->f_bsize = sbi->page_size;
     buf->f_blocks = sbi->mem[FAST_MEM].num_pages + sbi->mem[SLOW_MEM].num_pages;
-    buf->f_bfree = buf->f_bavail = sbi->mem[FAST_MEM].free_pages + sbi->mem[SLOW_MEM].num_pages;
+    buf->f_bfree = buf->f_bavail = sbi->mem[FAST_MEM].free_pages + sbi->mem[SLOW_MEM].free_pages;
     buf->f_files = LONG_MAX;
     buf->f_ffree = LONG_MAX;
     buf->f_namelen = 255;
