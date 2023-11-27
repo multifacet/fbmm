@@ -29,7 +29,73 @@ struct bwmmfs_inode_info *BWMMFS_I(struct inode *inode)
 
 static vm_fault_t bwmmfs_fault(struct vm_fault *vmf)
 {
-    return VM_FAULT_OOM;
+    struct vm_area_struct *vma = vmf->vma;
+    struct inode *inode = vma->vm_file->f_inode;
+    struct bwmmfs_inode_info * inode_info;
+    struct bwmmfs_sb_info *sbi;
+    struct page *page;
+    pte_t entry;
+
+    inode_info = BWMMFS_I(inode);
+    sbi = BWMMFS_SB(inode->i_sb);
+
+    // For now, do nothing if the pte already exists
+    if (vmf->pte) {
+        return VM_FAULT_NOPAGE;
+    }
+
+    if (pte_alloc(vma->vm_mm, vmf->pmd))
+        return VM_FAULT_OOM;
+
+    vmf->pte = pte_offset_map_lock(vma->vm_mm, vmf->pmd, vmf->address, &vmf->ptl);
+    if (!pte_none(*vmf->pte)) {
+        goto unlock;
+    }
+
+    page = mtree_load(&inode_info->mt, vmf->address);
+    if (!page) {
+        int weight_count = 0;
+        int current_count = atomic_inc_return(&inode_info->alloc_count) % sbi->total_weight;
+        struct bwmmfs_node_weights *node_weight;
+        int nid = NUMA_NO_NODE;
+
+
+        list_for_each_entry(node_weight, &sbi->node_list, list) {
+            weight_count += node_weight->weight;
+            if (current_count < weight_count) {
+                nid = node_weight->nid;
+                break;
+            }
+        }
+
+        if (nid == NUMA_NO_NODE)
+            BUG();
+
+        page = alloc_pages_node(nid, GFP_HIGHUSER | __GFP_ZERO, 0);
+        if (!page) {
+            pte_unmap_unlock(vmf->pte, vmf->ptl);
+            return VM_FAULT_OOM;
+        }
+        sbi->num_pages++;
+
+        mtree_store(&inode_info->mt, vmf->address, page, GFP_KERNEL);
+    }
+
+    // Construct the pte entry
+    entry = mk_pte(page, vma->vm_page_prot);
+    entry = pte_mkyoung(entry);
+    if (vma->vm_flags & VM_WRITE) {
+        entry = pte_mkwrite(pte_mkdirty(entry));
+    }
+
+    page_add_file_rmap(page, vma, false);
+    percpu_counter_inc(&vma->vm_mm->rss_stat[MM_FILEPAGES]);
+    set_pte_at(vma->vm_mm, vmf->address, vmf->pte, entry);
+    get_page(page);
+
+unlock:
+    pte_unmap_unlock(vmf->pte, vmf->ptl);
+    return VM_FAULT_NOPAGE;
 }
 
 static struct vm_operations_struct bwmmfs_vm_ops = {
@@ -88,6 +154,7 @@ struct inode *bwmmfs_get_inode(struct super_block *sb,
         return NULL;
     }
     mt_init(&info->mt);
+    atomic_set(&info->alloc_count, 0);
 
     inode->i_ino = get_next_ino();
     inode_init_owner(&init_user_ns, inode, dir, mode);
@@ -191,6 +258,19 @@ static int bwmmfs_statfs(struct dentry *dentry, struct kstatfs *buf)
 
 static void bwmmfs_free_inode(struct inode *inode)
 {
+    struct bwmmfs_sb_info *sbi = BWMMFS_SB(inode->i_sb);
+    struct bwmmfs_inode_info *inode_info = BWMMFS_I(inode);
+    struct page *page;
+    unsigned long index = 0;
+
+    // Release all of the pages associated with the file
+    mt_for_each(&inode_info->mt, page, index, ULONG_MAX) {
+        sbi->num_pages--;
+        put_page(page);
+    }
+
+    mtree_destroy(&inode_info->mt);
+    kfree(inode_info);
 }
 
 static int bwmmfs_show_options(struct seq_file *m, struct dentry *root)
@@ -223,6 +303,24 @@ static int bwmmfs_fill_super(struct super_block *sb, struct fs_context *fc)
     sb->s_blocksize_bits = PAGE_SHIFT;
 
     sbi->num_pages = 0;
+    INIT_LIST_HEAD(&sbi->node_list);
+
+    //TODO: Change this to use mount options for the node list
+    sbi->total_weight = 0;
+    for (int i = 0; i < 2; i++) {
+        struct bwmmfs_node_weights *weight = kzalloc(sizeof(struct bwmmfs_node_weights), GFP_KERNEL);
+        if (!weight)
+            return -ENOMEM;
+
+        weight->nid = i;
+        if (i == 0)
+            weight->weight = 1;
+        if (i == 1)
+            weight->weight = 1;
+
+        sbi->total_weight += weight->weight;
+        list_add(&weight->list, &sbi->node_list);
+    }
 
     inode = bwmmfs_get_inode(sb, NULL, S_IFDIR | 0755, 0);
     sb->s_root = d_make_root(inode);
