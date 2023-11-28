@@ -17,6 +17,11 @@
 static const struct super_operations bwmmfs_ops;
 static const struct inode_operations bwmmfs_dir_inode_operations;
 
+// Count of how many times a bwmmfs has been mounted.
+// Used to index the sysfs directories for the mount
+static atomic_t mount_count = ATOMIC_INIT(0);
+static struct kobj_attribute node_weight_attr;
+
 struct bwmmfs_sb_info *BWMMFS_SB(struct super_block *sb)
 {
     return sb->s_fs_info;
@@ -55,11 +60,12 @@ static vm_fault_t bwmmfs_fault(struct vm_fault *vmf)
     page = mtree_load(&inode_info->mt, vmf->address);
     if (!page) {
         int weight_count = 0;
-        int current_count = atomic_inc_return(&inode_info->alloc_count) % sbi->total_weight;
+        int current_count;
         struct bwmmfs_node_weights *node_weight;
         int nid = NUMA_NO_NODE;
 
-
+        down_read(&sbi->weights_lock);
+        current_count = atomic_inc_return(&inode_info->alloc_count) % sbi->total_weight;
         list_for_each_entry(node_weight, &sbi->node_list, list) {
             weight_count += node_weight->weight;
             if (current_count < weight_count) {
@@ -67,6 +73,7 @@ static vm_fault_t bwmmfs_fault(struct vm_fault *vmf)
                 break;
             }
         }
+        up_read(&sbi->weights_lock);
 
         if (nid == NUMA_NO_NODE)
             BUG();
@@ -285,10 +292,26 @@ static const struct super_operations bwmmfs_ops = {
     .show_options = bwmmfs_show_options,
 };
 
+// Basically taken from dynamic_kobj_type in /lib/kobject.c
+static void kfree_wrapper(struct kobject *kobj) {
+    kfree(kobj);
+}
+static const struct kobj_type bwmmfs_kobj_dyn_type = {
+    .release = kfree_wrapper,
+    .sysfs_ops = &kobj_sysfs_ops,
+};
+
+static const struct kobj_type bwmmfs_kobj_type = {
+    .sysfs_ops = &kobj_sysfs_ops,
+};
+
 static int bwmmfs_fill_super(struct super_block *sb, struct fs_context *fc)
 {
     struct inode *inode;
     struct bwmmfs_sb_info *sbi = kzalloc(sizeof(struct bwmmfs_sb_info), GFP_KERNEL);
+    int mount_id;
+    int err;
+    int nid;
 
     if (!sbi) {
         return -ENOMEM;
@@ -304,21 +327,46 @@ static int bwmmfs_fill_super(struct super_block *sb, struct fs_context *fc)
 
     sbi->num_pages = 0;
     INIT_LIST_HEAD(&sbi->node_list);
+    init_rwsem(&sbi->weights_lock);
 
-    //TODO: Change this to use mount options for the node list
+    //Setup the sysfs interface for setting the node weights
+    mount_id = atomic_inc_return(&mount_count);
+    kobject_init(&sbi->sysfs_kobj, &bwmmfs_kobj_type);
+    err = kobject_add(&sbi->sysfs_kobj, fs_kobj, "bwmmfs%d", mount_id);
+    if (err) {
+        pr_err("Failed to create bwmmfs kobj\n");
+        return err;
+    }
+
+    // Setup the directory for each NUMA node and set default weight values
     sbi->total_weight = 0;
-    for (int i = 0; i < 2; i++) {
-        struct bwmmfs_node_weights *weight = kzalloc(sizeof(struct bwmmfs_node_weights), GFP_KERNEL);
+    for_each_node(nid) {
+        struct kobject *node_kobj;
+        struct bwmmfs_node_weights *weight;
+
+        node_kobj = kzalloc(sizeof(struct kobject), GFP_KERNEL);
+        kobject_init(node_kobj, &bwmmfs_kobj_dyn_type);
+        err = kobject_add(node_kobj, &sbi->sysfs_kobj, "node%d", nid);
+        if (err) {
+            pr_err("Failed to create kobject for node %d\n", nid);
+            kobject_put(node_kobj);
+            continue;
+        }
+
+        err = sysfs_create_file(node_kobj, &node_weight_attr.attr);
+        if (err) {
+            pr_err("Failed to add node weight file for node %d\n", nid);
+            kobject_put(node_kobj);
+            continue;
+        }
+
+        weight = kzalloc(sizeof(struct bwmmfs_node_weights), GFP_KERNEL);
         if (!weight)
             return -ENOMEM;
 
-        weight->nid = i;
-        if (i == 0)
-            weight->weight = 1;
-        if (i == 1)
-            weight->weight = 1;
-
-        sbi->total_weight += weight->weight;
+        weight->nid = nid;
+        weight->weight = 1;
+        sbi->total_weight++;
         list_add(&weight->list, &sbi->node_list);
     }
 
@@ -397,6 +445,80 @@ void cleanup_module(void)
     printk(KERN_INFO "Removing BandwidthMMFS");
     unregister_filesystem(&bwmmfs_fs_type);
 }
+
+// Sysfs functions
+static int get_nid_from_kobj(struct kobject *kobj, int *nid)
+{
+    const char *nid_str;
+    int err;
+
+    // Tease out the nid from kobj
+    // The name is of the form "node%d", so skip past "node"
+    nid_str = &kobj->name[4];
+    err = kstrtoint(nid_str, 10, nid);
+    return err;
+}
+
+static ssize_t node_weight_show(struct kobject *kobj, struct kobj_attribute *attr,
+        char *buf)
+{
+    struct bwmmfs_sb_info *sbi = container_of(kobj->parent, struct bwmmfs_sb_info, sysfs_kobj);
+    struct bwmmfs_node_weights *weight;
+    int nid;
+    int err;
+
+    err = get_nid_from_kobj(kobj, &nid);
+    if (err) {
+        pr_err("Error parsing nid from %s\n", kobj->name);
+        return err;
+    }
+
+    list_for_each_entry(weight, &sbi->node_list, list) {
+        if (nid == weight->nid)
+            return sprintf(buf, "%d\n", weight->weight);
+    }
+
+    return sprintf(buf, "Not found!\n");
+}
+
+static ssize_t node_weight_store(struct kobject *kobj, struct kobj_attribute *attr,
+        const char *buf, size_t count)
+{
+    struct bwmmfs_sb_info *sbi = container_of(kobj->parent, struct bwmmfs_sb_info, sysfs_kobj);
+    struct bwmmfs_node_weights *weight;
+    int nid;
+    u32 new_weight;
+    int err;
+
+    err = get_nid_from_kobj(kobj, &nid);
+    if (err) {
+        pr_err("Error parsing nid from %s\n", kobj->name);
+        return err;
+    }
+
+    err = kstrtouint(buf, 10, &new_weight);
+    if (err) {
+        pr_err("Error parsing new weight from %s\n", buf);
+        return err;
+    }
+
+    // We have to reset the total weight
+    down_write(&sbi->weights_lock);
+    sbi->total_weight = 0;
+    list_for_each_entry(weight, &sbi->node_list, list) {
+        if (nid == weight->nid)
+            weight->weight = new_weight;
+
+        sbi->total_weight += weight->weight;
+    }
+    up_write(&sbi->weights_lock);
+
+    return count;
+}
+
+
+static struct kobj_attribute node_weight_attr =
+__ATTR(weight, 0644, node_weight_show, node_weight_store);
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Bijan Tabatabai");

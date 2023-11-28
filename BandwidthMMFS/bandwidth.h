@@ -17,6 +17,8 @@ struct bwmmfs_node_weights {
 struct bwmmfs_sb_info {
     u64 num_pages;
     u32 total_weight;
+    struct rw_semaphore weights_lock;
+    struct kobject sysfs_kobj;
     struct list_head node_list;
 };
 
