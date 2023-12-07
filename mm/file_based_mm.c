@@ -46,10 +46,12 @@ static DECLARE_RWSEM(fbmm_procs_sem);
 // An entry for a pid exists in this tree iff the process of that pid is using FBMM.
 static struct maple_tree fbmm_proc_mnt_dirs = MTREE_INIT(fbmm_proc_mnt_dirs, 0);
 
-static ktime_t file_create_time = 0;
+static u64 file_create_time = 0;
 static u64 num_file_creates = 0;
-static ktime_t file_register_time = 0;
+static u64 file_register_time = 0;
 static u64 num_file_registers = 0;
+static u64 munmap_time = 0;
+static u64 num_munmaps = 0;
 
 static int fbmm_prealloc_map_populate = 1;
 
@@ -209,7 +211,7 @@ struct file *fbmm_create_new_file(unsigned long len, unsigned long prot, int fla
 	int open_flags = O_EXCL | O_TMPFILE;
 	umode_t open_mode = 0;
 	int ret = 0;
-	ktime_t start_time = ktime_get_ns();
+	u64 start_time = rdtsc();
 
 	// Determine what flags to use for the call to open
 	if (prot & PROT_EXEC)
@@ -241,7 +243,7 @@ struct file *fbmm_create_new_file(unsigned long len, unsigned long prot, int fla
 		return NULL;
 	}
 
-	file_create_time += ktime_get_ns() - start_time;
+	file_create_time += rdtsc() - start_time;
 	num_file_creates++;
 
 	return f;
@@ -254,7 +256,7 @@ void fbmm_register_file(pid_t pid, struct file *f,
 	struct fbmm_mapping *mapping = NULL;
 	struct fbmm_file *file = NULL;
 	bool new_proc = false;
-	ktime_t start_time = ktime_get_ns();
+	u64 start_time = rdtsc();
 
 	down_read(&fbmm_procs_sem);
 	proc = get_fbmm_proc(pid);
@@ -302,7 +304,7 @@ void fbmm_register_file(pid_t pid, struct file *f,
 		insert_new_proc(proc);
 	up_write(&fbmm_procs_sem);
 
-	file_register_time += ktime_get_ns() - start_time;
+	file_register_time += rdtsc() - start_time;
 	num_file_registers++;
 
 	return;
@@ -321,6 +323,7 @@ int fbmm_munmap(pid_t pid, unsigned long start, unsigned long len) {
 	struct file *falloc_file = NULL;
 	bool do_falloc = false;
 	int ret = 0;
+	u64 start_time = rdtsc();
 
 	down_read(&fbmm_procs_sem);
 	proc = get_fbmm_proc(pid);
@@ -429,6 +432,9 @@ int fbmm_munmap(pid_t pid, unsigned long start, unsigned long len) {
 		start = next_start;
 	}
 
+	munmap_time += rdtsc() - start_time;
+	num_munmaps++;
+
 	return ret;
 exit_locked:
 	up_read(&fbmm_procs_sem);
@@ -529,6 +535,7 @@ static ssize_t fbmm_stats_show(struct kobject *kobj,
 {
     u64 avg_create_time = 0;
     u64 avg_register_time = 0;
+    u64 avg_munmap_time = 0;
     ssize_t count;
 
     if (num_file_creates != 0) {
@@ -537,11 +544,16 @@ static ssize_t fbmm_stats_show(struct kobject *kobj,
     if (num_file_registers != 0) {
         avg_register_time = file_register_time / num_file_registers;
     }
+    if (num_munmaps != 0) {
+        avg_munmap_time = munmap_time / num_munmaps;
+    }
 
     count = sprintf(buf, "file create times: %lld %lld %lld\n", file_create_time,
         num_file_creates, avg_create_time);
     count += sprintf(&buf[count], "file register times: %lld %lld %lld\n", file_register_time,
         num_file_registers, avg_register_time);
+    count += sprintf(&buf[count], "munmap times: %lld %lld %lld\n", munmap_time,
+        num_munmaps, avg_munmap_time);
 
     return count;
 }
