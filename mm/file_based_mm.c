@@ -46,6 +46,7 @@ static DECLARE_RWSEM(fbmm_procs_sem);
 // An entry for a pid exists in this tree iff the process of that pid is using FBMM.
 static struct maple_tree fbmm_proc_mnt_dirs = MTREE_INIT(fbmm_proc_mnt_dirs, 0);
 
+static DEFINE_SPINLOCK(stats_lock);
 static u64 file_create_time = 0;
 static u64 num_file_creates = 0;
 static u64 file_register_time = 0;
@@ -212,6 +213,7 @@ struct file *fbmm_create_new_file(unsigned long len, unsigned long prot, int fla
 	umode_t open_mode = 0;
 	int ret = 0;
 	u64 start_time = rdtsc();
+	u64 end_time;
 
 	// Determine what flags to use for the call to open
 	if (prot & PROT_EXEC)
@@ -243,8 +245,11 @@ struct file *fbmm_create_new_file(unsigned long len, unsigned long prot, int fla
 		return NULL;
 	}
 
-	file_create_time += rdtsc() - start_time;
+	end_time = rdtsc();
+	spin_lock(&stats_lock);
+	file_create_time += end_time - start_time;
 	num_file_creates++;
+	spin_unlock(&stats_lock);
 
 	return f;
 }
@@ -257,6 +262,7 @@ void fbmm_register_file(pid_t pid, struct file *f,
 	struct fbmm_file *file = NULL;
 	bool new_proc = false;
 	u64 start_time = rdtsc();
+	u64 end_time;
 
 	down_read(&fbmm_procs_sem);
 	proc = get_fbmm_proc(pid);
@@ -304,8 +310,11 @@ void fbmm_register_file(pid_t pid, struct file *f,
 		insert_new_proc(proc);
 	up_write(&fbmm_procs_sem);
 
-	file_register_time += rdtsc() - start_time;
+	end_time = rdtsc();
+	spin_lock(&stats_lock);
+	file_register_time += end_time - start_time;
 	num_file_registers++;
+	spin_unlock(&stats_lock);
 
 	return;
 err:
@@ -324,6 +333,7 @@ int fbmm_munmap(pid_t pid, unsigned long start, unsigned long len) {
 	bool do_falloc = false;
 	int ret = 0;
 	u64 start_time = rdtsc();
+	u64 end_time;
 
 	down_read(&fbmm_procs_sem);
 	proc = get_fbmm_proc(pid);
@@ -432,8 +442,11 @@ int fbmm_munmap(pid_t pid, unsigned long start, unsigned long len) {
 		start = next_start;
 	}
 
-	munmap_time += rdtsc() - start_time;
+	end_time = rdtsc();
+	spin_lock(&stats_lock);
+	munmap_time += end_time - start_time;
 	num_munmaps++;
+	spin_unlock(&stats_lock);
 
 	return ret;
 exit_locked:
