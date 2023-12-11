@@ -579,6 +579,8 @@ static ssize_t fbmm_stats_store(struct kobject *kobj,
 	num_file_creates = 0;
 	file_register_time = 0;
 	num_file_registers = 0;
+	munmap_time = 0;
+	num_munmaps = 0;
 	return count;
 }
 static struct kobj_attribute fbmm_stats_attribute =
