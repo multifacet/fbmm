@@ -211,7 +211,7 @@ struct file *fbmm_create_new_file(unsigned long len, unsigned long prot, int fla
 	struct file *f;
 	int open_flags = O_EXCL | O_TMPFILE;
 	umode_t open_mode = 0;
-	int ret = 0;
+	s64 ret = 0;
 	u64 start_time = rdtsc();
 	u64 end_time;
 
@@ -236,13 +236,13 @@ struct file *fbmm_create_new_file(unsigned long len, unsigned long prot, int fla
 
 	f = filp_open(file_dir, open_flags, open_mode);
 	if (IS_ERR(f))
-		return NULL;
+		return f;
 
 	// Set the file to the correct size
 	ret = truncate_fbmm_file(f, len, flags);
 	if (ret) {
 		filp_close(f, current->files);
-		return NULL;
+		return (struct file *)ret;
 	}
 
 	end_time = rdtsc();

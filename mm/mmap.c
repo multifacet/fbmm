@@ -1297,7 +1297,7 @@ unsigned long do_mmap(struct file *file, unsigned long addr,
 	if (!file && (flags & MAP_ANONYMOUS) && use_file_based_mm(current->tgid)) {
 		file = fbmm_create_new_file(len, prot, flags);
 
-		if (file) {
+		if (file && !IS_ERR(file)) {
 			created_fbmm_file = true;
 			flags = flags & ~MAP_ANONYMOUS;
 
@@ -1307,6 +1307,9 @@ unsigned long do_mmap(struct file *file, unsigned long addr,
 				flags = flags & ~MAP_PRIVATE;
 				flags = flags | MAP_SHARED;
 			}
+		} else {
+			pr_err("Failed to create fbmm file: %ld\n", (long)file);
+			file = NULL;
 		}
 	}
 
