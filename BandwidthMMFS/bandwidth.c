@@ -32,6 +32,30 @@ struct bwmmfs_inode_info *BWMMFS_I(struct inode *inode)
     return inode->i_private;
 }
 
+static struct page *bwmmfs_alloc_page(struct bwmmfs_sb_info *sbi, struct bwmmfs_inode_info *inode_info)
+{
+    int weight_count = 0;
+    int current_count;
+    struct bwmmfs_node_weights *node_weight;
+    int nid = NUMA_NO_NODE;
+
+    down_read(&sbi->weights_lock);
+    current_count = atomic_inc_return(&inode_info->alloc_count) % sbi->total_weight;
+    list_for_each_entry(node_weight, &sbi->node_list, list) {
+        weight_count += node_weight->weight;
+        if (current_count < weight_count) {
+            nid = node_weight->nid;
+            break;
+        }
+    }
+    up_read(&sbi->weights_lock);
+
+    if (nid == NUMA_NO_NODE)
+        BUG();
+
+    return alloc_pages_node(nid, GFP_HIGHUSER | __GFP_ZERO, 0);
+}
+
 static vm_fault_t bwmmfs_fault(struct vm_fault *vmf)
 {
     struct vm_area_struct *vma = vmf->vma;
@@ -39,6 +63,7 @@ static vm_fault_t bwmmfs_fault(struct vm_fault *vmf)
     struct bwmmfs_inode_info * inode_info;
     struct bwmmfs_sb_info *sbi;
     struct page *page;
+    loff_t offset = vmf->address - vma->vm_start;
     pte_t entry;
 
     inode_info = BWMMFS_I(inode);
@@ -57,35 +82,16 @@ static vm_fault_t bwmmfs_fault(struct vm_fault *vmf)
         goto unlock;
     }
 
-    page = mtree_load(&inode_info->mt, vmf->address);
+    page = mtree_load(&inode_info->mt, offset);
     if (!page) {
-        int weight_count = 0;
-        int current_count;
-        struct bwmmfs_node_weights *node_weight;
-        int nid = NUMA_NO_NODE;
-
-        down_read(&sbi->weights_lock);
-        current_count = atomic_inc_return(&inode_info->alloc_count) % sbi->total_weight;
-        list_for_each_entry(node_weight, &sbi->node_list, list) {
-            weight_count += node_weight->weight;
-            if (current_count < weight_count) {
-                nid = node_weight->nid;
-                break;
-            }
-        }
-        up_read(&sbi->weights_lock);
-
-        if (nid == NUMA_NO_NODE)
-            BUG();
-
-        page = alloc_pages_node(nid, GFP_HIGHUSER | __GFP_ZERO, 0);
+        page = bwmmfs_alloc_page(sbi, inode_info);
         if (!page) {
             pte_unmap_unlock(vmf->pte, vmf->ptl);
             return VM_FAULT_OOM;
         }
         sbi->num_pages++;
 
-        mtree_store(&inode_info->mt, vmf->address, page, GFP_KERNEL);
+        mtree_store(&inode_info->mt, offset, page, GFP_KERNEL);
     }
 
     // Construct the pte entry
@@ -122,7 +128,28 @@ static int bwmmfs_mmap(struct file *file, struct vm_area_struct *vma)
 
 static long bwmmfs_fallocate(struct file *file, int mode, loff_t offset, loff_t len)
 {
-    return -EINVAL;
+    struct inode *inode = file_inode(file);
+    struct bwmmfs_inode_info *inode_info = BWMMFS_I(inode);
+    struct bwmmfs_sb_info *sbi = BWMMFS_SB(inode->i_sb);
+    struct page *page;
+    loff_t off;
+
+    if (mode != 0) {
+        return -EOPNOTSUPP;
+    }
+
+    // Allocate and add mappings for the desired range
+    for (off = offset; off < offset + len; off += PAGE_SIZE) {
+        page = bwmmfs_alloc_page(sbi, inode_info);
+        if (!page) {
+            return -ENOMEM;
+        }
+
+
+        mtree_store(&inode_info->mt, off, page, GFP_KERNEL);
+    }
+
+    return 0;
 }
 
 const struct file_operations bwmmfs_file_operations = {
