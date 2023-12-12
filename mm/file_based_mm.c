@@ -235,8 +235,10 @@ struct file *fbmm_create_new_file(unsigned long len, unsigned long prot, int fla
 		return NULL;
 
 	f = filp_open(file_dir, open_flags, open_mode);
-	if (IS_ERR(f))
+	if (IS_ERR(f)) {
+		pr_err("mount dir %s\n", file_dir);
 		return f;
+	}
 
 	// Set the file to the correct size
 	ret = truncate_fbmm_file(f, len, flags);

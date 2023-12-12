@@ -3662,15 +3662,21 @@ static int do_tmpfile(struct nameidata *nd, unsigned flags,
 	struct path path;
 	int error = path_lookupat(nd, flags | LOOKUP_DIRECTORY, &path);
 
-	if (unlikely(error))
+	if (unlikely(error)) {
+		pr_err("do_tmpfile 1\n");
 		return error;
+	}
 	error = mnt_want_write(path.mnt);
-	if (unlikely(error))
+	if (unlikely(error)) {
+		pr_err("do_tmpfile 2\n");
 		goto out;
+	}
 	mnt_userns = mnt_user_ns(path.mnt);
 	error = vfs_tmpfile(mnt_userns, &path, file, op->mode);
-	if (error)
+	if (error) {
+		pr_err("do_tmpfile 3\n");
 		goto out2;
+	}
 	audit_inode(nd->name, file->f_path.dentry, 0);
 out2:
 	mnt_drop_write(path.mnt);
@@ -3739,11 +3745,18 @@ struct file *do_filp_open(int dfd, struct filename *pathname,
 
 	set_nameidata(&nd, dfd, pathname, NULL);
 	filp = path_openat(&nd, op, flags | LOOKUP_RCU);
-	if (unlikely(filp == ERR_PTR(-ECHILD)))
+	if (unlikely(filp == ERR_PTR(-ECHILD))) {
+		pr_err("do_filep_open 1\n");
 		filp = path_openat(&nd, op, flags);
-	if (unlikely(filp == ERR_PTR(-ESTALE)))
+	}
+	if (unlikely(filp == ERR_PTR(-ESTALE))) {
+		pr_err("do_filep_open 2\n");
 		filp = path_openat(&nd, op, flags | LOOKUP_REVAL);
+	}
 	restore_nameidata();
+
+	if (IS_ERR(filp))
+		pr_err("do_filp_open err %ld\n", (long)filp);
 	return filp;
 }
 

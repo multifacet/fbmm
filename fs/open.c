@@ -1164,10 +1164,14 @@ inline int build_open_flags(const struct open_how *how, struct open_flags *op)
 	 * have to require userspace to explicitly set it.
 	 */
 	if (flags & __O_TMPFILE) {
-		if ((flags & O_TMPFILE_MASK) != O_TMPFILE)
+		if ((flags & O_TMPFILE_MASK) != O_TMPFILE) {
+			pr_err("1 %lld\n", flags & O_TMPFILE_MASK);
 			return -EINVAL;
-		if (!(acc_mode & MAY_WRITE))
+		}
+		if (!(acc_mode & MAY_WRITE)) {
+			pr_err("2\n");
 			return -EINVAL;
+		}
 	}
 	if (flags & O_PATH) {
 		/* O_PATH only permits certain other flags to be set. */
@@ -1250,8 +1254,10 @@ struct file *file_open_name(struct filename *name, int flags, umode_t mode)
 	struct open_flags op;
 	struct open_how how = build_open_how(flags, mode);
 	int err = build_open_flags(&how, &op);
-	if (err)
+	if (err) {
+		pr_err("filp_open_name\n");
 		return ERR_PTR(err);
+	}
 	return do_filp_open(AT_FDCWD, name, &op);
 }
 
@@ -1274,6 +1280,8 @@ struct file *filp_open(const char *filename, int flags, umode_t mode)
 	if (!IS_ERR(name)) {
 		file = file_open_name(name, flags, mode);
 		putname(name);
+	} else {
+		pr_err("filp_open\n");
 	}
 	return file;
 }
