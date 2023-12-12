@@ -3736,6 +3736,7 @@ static struct file *path_openat(struct nameidata *nd,
 	return ERR_PTR(error);
 }
 
+#include <linux/file_based_mm.h>
 struct file *do_filp_open(int dfd, struct filename *pathname,
 		const struct open_flags *op)
 {
@@ -3755,7 +3756,7 @@ struct file *do_filp_open(int dfd, struct filename *pathname,
 	}
 	restore_nameidata();
 
-	if (IS_ERR(filp))
+	if (IS_ERR(filp) && use_file_based_mm(current->tgid))
 		pr_err("do_filp_open err %ld\n", (long)filp);
 	return filp;
 }
