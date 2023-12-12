@@ -185,7 +185,7 @@ static void drop_fbmm_file(struct fbmm_mapping *map) {
 	if (map->file->count <= 0) {
 		filp_close(map->file->f, current->files);
 		fput(map->file->f);
-		vfree(map->file);
+		kfree(map->file);
 		map->file = NULL;
 	}
 }
@@ -271,7 +271,7 @@ void fbmm_register_file(pid_t pid, struct file *f,
 	if (!proc) {
 		new_proc = true;
 
-		proc = vmalloc(sizeof(struct fbmm_proc));
+		proc = kmalloc(sizeof(struct fbmm_proc), GFP_KERNEL);
 		if (!proc) {
 			pr_err("fbmm_create_new_file: not enough memory for proc\n");
 			return;
@@ -281,7 +281,7 @@ void fbmm_register_file(pid_t pid, struct file *f,
 		proc->mappings = RB_ROOT;
 	}
 
-	file = vmalloc(sizeof(struct fbmm_file));
+	file = kmalloc(sizeof(struct fbmm_file), GFP_KERNEL);
 	if (!file)
 		goto err;
 
@@ -292,7 +292,7 @@ void fbmm_register_file(pid_t pid, struct file *f,
 	file->original_start = start;
 
 	// Create the new mapping
-	mapping = vmalloc(sizeof(struct fbmm_mapping));
+	mapping = kmalloc(sizeof(struct fbmm_mapping), GFP_KERNEL);
 	if (!mapping) {
 		pr_err("fbmm_create_new_file: not enough memory for mapping\n");
 		goto err;
@@ -319,9 +319,9 @@ void fbmm_register_file(pid_t pid, struct file *f,
 	return;
 err:
 	if (new_proc)
-		vfree(proc);
+		kfree(proc);
 	if (file)
-		vfree(file);
+		kfree(file);
 }
 
 int fbmm_munmap(pid_t pid, unsigned long start, unsigned long len) {
@@ -375,7 +375,7 @@ int fbmm_munmap(pid_t pid, unsigned long start, unsigned long len) {
 				do_falloc = true;
 			}
 
-			vfree(old_mapping);
+			kfree(old_mapping);
 
 			up_write(&fbmm_procs_sem);
 		}
@@ -408,7 +408,7 @@ int fbmm_munmap(pid_t pid, unsigned long start, unsigned long len) {
 		// in the middle of the file and create a new mapping to represent
 		// the split
 		else if (old_mapping->start < start && end < old_mapping->end) {
-			struct fbmm_mapping *new_mapping = vmalloc(sizeof(struct fbmm_mapping));
+			struct fbmm_mapping *new_mapping = kmalloc(sizeof(struct fbmm_mapping), GFP_KERNEL);
 
 			if (!new_mapping) {
 				pr_err("fbmm_munmap: can't allocate new fbmm_mapping\n");
@@ -477,21 +477,21 @@ void fbmm_check_exiting_proc(pid_t pid) {
 
 		drop_fbmm_file(map);
 
-		vfree(map);
+		kfree(map);
 	}
 
 	// Now, remove the proc from the procs tree and free it
 	// TODO: I might be able to remove the proc from the proc tree first,
 	// then free everything else without holding any locks...
 	rb_erase(&proc->node, &fbmm_procs);
-	vfree(proc);
+	kfree(proc);
 
 	up_write(&fbmm_procs_sem);
 
 	// Also remove this proc from the proc_mnt_dirs maple tree
 	buf = mtree_erase(&fbmm_proc_mnt_dirs, pid);
 	if (buf)
-		vfree(buf);
+		kfree(buf);
 }
 
 // Make the default mmfs dir of the dst the same as src
@@ -506,7 +506,7 @@ int fbmm_copy_mnt_dir(pid_t src, pid_t dst) {
 		return -1;
 
 	len = strnlen(mt_entry, PATH_MAX);
-	buffer = vmalloc(PATH_MAX + 1);
+	buffer = kmalloc(PATH_MAX + 1, GFP_KERNEL);
 	strncpy(buffer, mt_entry, len);
 
 	return mtree_store(&fbmm_proc_mnt_dirs, dst, buffer, GFP_KERNEL);
@@ -834,7 +834,7 @@ static ssize_t fbmm_mnt_dir_read(struct file *file, char __user *ubuf,
 	if (!task)
 		return -ESRCH;
 
-	buffer = vmalloc(PATH_MAX + 1);
+	buffer = kmalloc(PATH_MAX + 1, GFP_KERNEL);
 	if (!buffer) {
 		put_task_struct(task);
 		return -ENOMEM;
@@ -849,7 +849,7 @@ static ssize_t fbmm_mnt_dir_read(struct file *file, char __user *ubuf,
 
 	ret = simple_read_from_buffer(ubuf, count, ppos, buffer, len);
 
-	vfree(buffer);
+	kfree(buffer);
 	put_task_struct(task);
 
 	return ret;
@@ -868,12 +868,12 @@ static ssize_t fbmm_mnt_dir_write(struct file *file, const char __user *ubuf,
 		return -ENOMEM;
 	}
 
-	buffer = vmalloc(count + 1);
+	buffer = kmalloc(count + 1, GFP_KERNEL);
 	if (!buffer)
 		return -ENOMEM;
 
 	if (copy_from_user(buffer, ubuf, count)) {
-		vfree(buffer);
+		kfree(buffer);
 		return -EFAULT;
 	}
 	buffer[count] = 0;
@@ -885,7 +885,7 @@ static ssize_t fbmm_mnt_dir_write(struct file *file, const char __user *ubuf,
 
 	task = extern_get_proc_task(file_inode(file));
 	if (!task) {
-		vfree(buffer);
+		kfree(buffer);
 		return -ESRCH;
 	}
 
@@ -898,12 +898,12 @@ static ssize_t fbmm_mnt_dir_write(struct file *file, const char __user *ubuf,
 		ret = mtree_store(&fbmm_proc_mnt_dirs, task->tgid, buffer, GFP_KERNEL);
 	} else {
 		// We don't need the buffer we created anymore
-		vfree(buffer);
+		kfree(buffer);
 
 		// If the previous entry stored a value, free it
 		buffer = mtree_erase(&fbmm_proc_mnt_dirs, task->tgid);
 		if (buffer)
-			vfree(buffer);
+			kfree(buffer);
 	}
 
 	put_task_struct(task);
