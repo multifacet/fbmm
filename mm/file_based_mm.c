@@ -502,6 +502,10 @@ int fbmm_copy_mnt_dir(pid_t src, pid_t dst) {
 	char *mt_entry;
 	size_t len;
 
+	// noop
+	if (src == dst)
+		return 0;
+
 	// Does the src actually have a default mnt dir
 	mt_entry = mtree_load(&fbmm_proc_mnt_dirs, src);
 	if (!mt_entry)
@@ -509,7 +513,7 @@ int fbmm_copy_mnt_dir(pid_t src, pid_t dst) {
 
 	len = strnlen(mt_entry, PATH_MAX);
 	buffer = kmalloc(PATH_MAX + 1, GFP_KERNEL);
-	strncpy(buffer, mt_entry, len);
+	strncpy(buffer, mt_entry, len + 1);
 
 	return mtree_store(&fbmm_proc_mnt_dirs, dst, buffer, GFP_KERNEL);
 }
