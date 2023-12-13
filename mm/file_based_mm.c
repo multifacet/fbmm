@@ -34,17 +34,17 @@ struct fbmm_mapping {
 
 struct fbmm_proc {
 	pid_t pid;
+	char *mnt_dir_str;
+	struct path mnt_dir_path;
 	struct rb_root mappings;
-	struct rb_node node;
 };
 
 
 static enum file_based_mm_state fbmm_state = FBMM_OFF;
-static struct rb_root fbmm_procs = RB_ROOT;
 static DECLARE_RWSEM(fbmm_procs_sem);
 // This is used to store the default fbmm mount directories for each proc.
 // An entry for a pid exists in this tree iff the process of that pid is using FBMM.
-static struct maple_tree fbmm_proc_mnt_dirs = MTREE_INIT(fbmm_proc_mnt_dirs, 0);
+static struct maple_tree fbmm_proc_mt = MTREE_INIT(fbmm_proc_mt, 0);
 
 static DEFINE_SPINLOCK(stats_lock);
 static u64 file_create_time = 0;
@@ -59,43 +59,30 @@ static int fbmm_prealloc_map_populate = 1;
 ///////////////////////////////////////////////////////////////////////////////
 // struct fbmm_proc functions
 
-static struct fbmm_proc *get_fbmm_proc(pid_t pid) {
-	struct rb_node *node = fbmm_procs.rb_node;
+static struct fbmm_proc *fbmm_create_new_proc(char *mnt_dir_str, pid_t pid) {
+	struct fbmm_proc *proc;
+	int ret;
 
-	while (node) {
-		struct fbmm_proc *proc = rb_entry(node, struct fbmm_proc, node);
-
-		if (pid < proc->pid)
-			node = node->rb_left;
-		else if (pid > proc->pid)
-			node = node->rb_right;
-		else
-			return proc;
+	proc = kmalloc(sizeof(struct fbmm_proc), GFP_KERNEL);
+	if (!proc) {
+		pr_err("fbmm_create_new_proc: not enough memory for proc\n");
+		return NULL;
 	}
 
-	return NULL;
+	proc->mnt_dir_str = mnt_dir_str;
+	ret = kern_path(mnt_dir_str, LOOKUP_DIRECTORY | LOOKUP_FOLLOW, &proc->mnt_dir_path);
+	proc->pid = pid;
+	proc->mappings = RB_ROOT;
+
+	pr_err("Create new proc %d %s %d\n", pid, proc->mnt_dir_str, ret);
+
+	return proc;
 }
 
-static void insert_new_proc(struct fbmm_proc *new_proc) {
-	struct rb_node **new = &(fbmm_procs.rb_node);
-	struct rb_node *parent = NULL;
-
-	while (*new) {
-		struct fbmm_proc *cur = rb_entry(*new, struct fbmm_proc, node);
-
-		parent = *new;
-		if (new_proc->pid < cur->pid)
-			new = &((*new)->rb_left);
-		else if (new_proc->pid > cur->pid)
-			new = &((*new)->rb_right);
-		else {
-			pr_err("insert_new_proc: Attempting to insert already existing proc\n");
-			BUG();
-		}
-	}
-
-	rb_link_node(&new_proc->node, parent, new);
-	rb_insert_color(&new_proc->node, &fbmm_procs);
+static void fbmm_free_proc(struct fbmm_proc *proc) {
+	kfree(proc->mnt_dir_str);
+	path_put(&proc->mnt_dir_path);
+	kfree(proc);
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -197,7 +184,7 @@ bool use_file_based_mm(pid_t pid) {
 	if (fbmm_state == FBMM_OFF) {
 		return false;
 	} if (fbmm_state == FBMM_SELECTED_PROCS) {
-		return mtree_load(&fbmm_proc_mnt_dirs, pid) != NULL;
+		return mtree_load(&fbmm_proc_mt, pid) != NULL;
 	} else if (fbmm_state == FBMM_ALL) {
 		return true;
 	}
@@ -207,10 +194,11 @@ bool use_file_based_mm(pid_t pid) {
 }
 
 struct file *fbmm_create_new_file(unsigned long len, unsigned long prot, int flags) {
-    char *file_dir;
 	struct file *f;
+	struct fbmm_proc *proc;
+	struct path *path;
 	int open_flags = O_EXCL | O_TMPFILE;
-	umode_t open_mode = 0;
+	umode_t open_mode = S_IFREG;
 	s64 ret = 0;
 	u64 start_time = rdtsc();
 	u64 end_time;
@@ -230,13 +218,19 @@ struct file *fbmm_create_new_file(unsigned long len, unsigned long prot, int fla
 		return NULL;
 	}
 
-	file_dir = mtree_load(&fbmm_proc_mnt_dirs, current->tgid);
-	if (!file_dir)
-		return NULL;
+	down_read(&fbmm_procs_sem);
+	proc = mtree_load(&fbmm_proc_mt, current->tgid);
+	if (!proc) {
+		goto err;
+	}
 
-	f = filp_open(file_dir, open_flags, open_mode);
-	if (IS_ERR(f))
-		return f;
+	path = &proc->mnt_dir_path;
+	f = vfs_tmpfile_open(mnt_user_ns(path->mnt), path, open_mode, open_flags, current_cred());
+	if (IS_ERR(f)) {
+		goto err;
+	}
+
+	up_read(&fbmm_procs_sem);
 
 	// Set the file to the correct size
 	ret = truncate_fbmm_file(f, len, flags);
@@ -252,6 +246,10 @@ struct file *fbmm_create_new_file(unsigned long len, unsigned long prot, int fla
 	spin_unlock(&stats_lock);
 
 	return f;
+
+err:
+	up_read(&fbmm_procs_sem);
+	return NULL;
 }
 
 void fbmm_register_file(pid_t pid, struct file *f,
@@ -260,25 +258,15 @@ void fbmm_register_file(pid_t pid, struct file *f,
 	struct fbmm_proc *proc;
 	struct fbmm_mapping *mapping = NULL;
 	struct fbmm_file *file = NULL;
-	bool new_proc = false;
 	u64 start_time = rdtsc();
 	u64 end_time;
 
 	down_read(&fbmm_procs_sem);
-	proc = get_fbmm_proc(pid);
+	proc = mtree_load(&fbmm_proc_mt, current->tgid);
 	up_read(&fbmm_procs_sem);
 	// Create the proc data structure if it does not already exist
 	if (!proc) {
-		new_proc = true;
-
-		proc = kmalloc(sizeof(struct fbmm_proc), GFP_KERNEL);
-		if (!proc) {
-			pr_err("fbmm_create_new_file: not enough memory for proc\n");
-			return;
-		}
-
-		proc->pid = pid;
-		proc->mappings = RB_ROOT;
+		BUG();
 	}
 
 	file = kmalloc(sizeof(struct fbmm_file), GFP_KERNEL);
@@ -305,9 +293,6 @@ void fbmm_register_file(pid_t pid, struct file *f,
 
 	insert_new_mapping(proc, mapping);
 
-	// If we created a new fbmm_proc, add it to the rb_tree
-	if (new_proc)
-		insert_new_proc(proc);
 	up_write(&fbmm_procs_sem);
 
 	end_time = rdtsc();
@@ -318,8 +303,6 @@ void fbmm_register_file(pid_t pid, struct file *f,
 
 	return;
 err:
-	if (new_proc)
-		kfree(proc);
 	if (file)
 		kfree(file);
 }
@@ -336,7 +319,7 @@ int fbmm_munmap(pid_t pid, unsigned long start, unsigned long len) {
 	u64 end_time;
 
 	down_read(&fbmm_procs_sem);
-	proc = get_fbmm_proc(pid);
+	proc = mtree_load(&fbmm_proc_mt, pid);
 	up_read(&fbmm_procs_sem);
 
 	if (!proc)
@@ -457,10 +440,9 @@ exit_locked:
 void fbmm_check_exiting_proc(pid_t pid) {
 	struct fbmm_proc *proc;
 	struct rb_node *node;
-	void *buf;
 
 	down_read(&fbmm_procs_sem);
-	proc = get_fbmm_proc(pid);
+	proc = mtree_erase(&fbmm_proc_mt, pid);
 	up_read(&fbmm_procs_sem);
 
 	if (!proc)
@@ -480,24 +462,17 @@ void fbmm_check_exiting_proc(pid_t pid) {
 		kfree(map);
 	}
 
-	// Now, remove the proc from the procs tree and free it
-	// TODO: I might be able to remove the proc from the proc tree first,
-	// then free everything else without holding any locks...
-	rb_erase(&proc->node, &fbmm_procs);
-	kfree(proc);
-
 	up_write(&fbmm_procs_sem);
 
-	// Also remove this proc from the proc_mnt_dirs maple tree
-	buf = mtree_erase(&fbmm_proc_mnt_dirs, pid);
-	if (buf)
-		kfree(buf);
+	fbmm_free_proc(proc);
 }
 
 // Make the default mmfs dir of the dst the same as src
 int fbmm_copy_mnt_dir(pid_t src, pid_t dst) {
+	struct fbmm_proc *proc;
+	struct fbmm_proc *new_proc;
 	char *buffer;
-	char *mt_entry;
+	char *src_dir;
 	size_t len;
 
 	// noop
@@ -505,15 +480,19 @@ int fbmm_copy_mnt_dir(pid_t src, pid_t dst) {
 		return 0;
 
 	// Does the src actually have a default mnt dir
-	mt_entry = mtree_load(&fbmm_proc_mnt_dirs, src);
-	if (!mt_entry)
+	proc = mtree_load(&fbmm_proc_mt, src);
+	if (!proc)
 		return -1;
 
-	len = strnlen(mt_entry, PATH_MAX);
-	buffer = kmalloc(PATH_MAX + 1, GFP_KERNEL);
-	strncpy(buffer, mt_entry, len + 1);
+	src_dir = proc->mnt_dir_str;
 
-	return mtree_store(&fbmm_proc_mnt_dirs, dst, buffer, GFP_KERNEL);
+	len = strnlen(src_dir, PATH_MAX);
+	buffer = kmalloc(PATH_MAX + 1, GFP_KERNEL);
+	strncpy(buffer, src_dir, len + 1);
+
+	new_proc = fbmm_create_new_proc(buffer, dst);
+
+	return mtree_store(&fbmm_proc_mt, dst, new_proc, GFP_KERNEL);
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -832,7 +811,7 @@ static ssize_t fbmm_mnt_dir_read(struct file *file, char __user *ubuf,
 {
 	struct task_struct *task = extern_get_proc_task(file_inode(file));
 	char *buffer;
-	char *mt_entry;
+	struct fbmm_proc *proc;
 	size_t len, ret;
 
 	if (!task)
@@ -845,9 +824,9 @@ static ssize_t fbmm_mnt_dir_read(struct file *file, char __user *ubuf,
 	}
 
 	// See if the selected task has an entry in the maple tree
-	mt_entry = mtree_load(&fbmm_proc_mnt_dirs, task->tgid);
-	if (mt_entry)
-		len = sprintf(buffer, "%s\n", mt_entry);
+	proc = mtree_load(&fbmm_proc_mt, task->tgid);
+	if (proc)
+		len = sprintf(buffer, "%s\n", proc->mnt_dir_str);
 	else
 		len = sprintf(buffer, "not enabled\n");
 
@@ -865,6 +844,7 @@ static ssize_t fbmm_mnt_dir_write(struct file *file, const char __user *ubuf,
 	struct task_struct *task;
 	struct path p;
 	char *buffer;
+	struct fbmm_proc *proc;
 	bool clear_entry = true;
 	int ret = 0;
 
@@ -894,21 +874,32 @@ static ssize_t fbmm_mnt_dir_write(struct file *file, const char __user *ubuf,
 	}
 
 	// Check if the given path is actually a valid directory
-	ret = kern_path(buffer, LOOKUP_DIRECTORY, &p);
+	ret = kern_path(buffer, LOOKUP_DIRECTORY | LOOKUP_FOLLOW, &p);
 	if (!ret)
 		clear_entry = false;
 
+	down_write(&fbmm_procs_sem);
 	if (!clear_entry) {
-		ret = mtree_store(&fbmm_proc_mnt_dirs, task->tgid, buffer, GFP_KERNEL);
+		proc = mtree_load(&fbmm_proc_mt, task->tgid);
+
+		if (!proc) {
+			proc = fbmm_create_new_proc(buffer, task->tgid);
+			ret = mtree_store(&fbmm_proc_mt, task->tgid, proc, GFP_KERNEL);
+		} else {
+			proc->mnt_dir_str = buffer;
+			ret = kern_path(buffer, LOOKUP_DIRECTORY | LOOKUP_FOLLOW, &proc->mnt_dir_path);
+		}
+
 	} else {
 		// We don't need the buffer we created anymore
 		kfree(buffer);
 
 		// If the previous entry stored a value, free it
-		buffer = mtree_erase(&fbmm_proc_mnt_dirs, task->tgid);
-		if (buffer)
-			kfree(buffer);
+		proc = mtree_erase(&fbmm_proc_mt, task->tgid);
+		if (proc)
+			fbmm_free_proc(proc);
 	}
+	up_write(&fbmm_procs_sem);
 
 	put_task_struct(task);
 	if (ret)
