@@ -171,7 +171,7 @@ struct file *fbmm_create_new_file(unsigned long len, unsigned long prot, int fla
 	}
 
 	path = &proc->mnt_dir_path;
-	f = vfs_tmpfile_open(mnt_user_ns(path->mnt), path, open_mode, open_flags, current_cred());
+	f = file_open_root(path, "", open_flags, open_mode);
 	if (IS_ERR(f)) {
 		goto err;
 	}
