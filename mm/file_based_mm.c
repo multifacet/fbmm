@@ -74,8 +74,6 @@ static struct fbmm_proc *fbmm_create_new_proc(char *mnt_dir_str, pid_t pid) {
 	proc->pid = pid;
 	mt_init(&proc->mappings);
 
-	pr_err("Create new proc %d %s %d\n", pid, proc->mnt_dir_str, ret);
-
 	return proc;
 }
 
