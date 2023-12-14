@@ -36,7 +36,7 @@ struct fbmm_proc {
 	pid_t pid;
 	char *mnt_dir_str;
 	struct path mnt_dir_path;
-	struct rb_root mappings;
+	struct maple_tree mappings;
 };
 
 
@@ -72,7 +72,7 @@ static struct fbmm_proc *fbmm_create_new_proc(char *mnt_dir_str, pid_t pid) {
 	proc->mnt_dir_str = mnt_dir_str;
 	ret = kern_path(mnt_dir_str, LOOKUP_DIRECTORY | LOOKUP_FOLLOW, &proc->mnt_dir_path);
 	proc->pid = pid;
-	proc->mappings = RB_ROOT;
+	mt_init(&proc->mappings);
 
 	pr_err("Create new proc %d %s %d\n", pid, proc->mnt_dir_str, ret);
 
@@ -83,60 +83,6 @@ static void fbmm_free_proc(struct fbmm_proc *proc) {
 	kfree(proc->mnt_dir_str);
 	path_put(&proc->mnt_dir_path);
 	kfree(proc);
-}
-
-///////////////////////////////////////////////////////////////////////////////
-// struct fbmm_mapping functions
-
-static void insert_new_mapping(struct fbmm_proc *proc, struct fbmm_mapping *new_map) {
-	struct rb_node **new = &(proc->mappings.rb_node);
-	struct rb_node *parent = NULL;
-
-	while (*new) {
-		struct fbmm_mapping *cur = rb_entry(*new, struct fbmm_mapping, node);
-
-		// Check for an overlap
-		if ((new_map->start >= cur->start && new_map->start < cur->end) ||
-			(new_map->end > cur->start && new_map->end <= cur->end)) {
-			pr_err("insert_new_mapping: Attempting to insert overlapping mapping\n");
-			pr_err("insert_new_mapping: old mapping %llx %llx\n",
-				cur->start, cur->end);
-			pr_err("insert_new_mapping: new mapping %llx %llx\n",
-				new_map->start, new_map->end);
-			BUG();
-		}
-
-		parent = *new;
-		if (new_map->start < cur->start)
-			new = &((*new)->rb_left);
-		else
-			new = &((*new)->rb_right);
-	}
-
-	rb_link_node(&new_map->node, parent, new);
-	rb_insert_color(&new_map->node, &proc->mappings);
-}
-
-// Returns the first mapping in proc where addr < mapping->end, NULL if none exists.
-// Mostly taken from find_vma
-static struct fbmm_mapping *find_mapping(struct fbmm_proc *proc, unsigned long addr) {
-	struct fbmm_mapping *mapping = NULL;
-	struct rb_node *node = proc->mappings.rb_node;
-
-	while (node) {
-		struct fbmm_mapping *tmp = rb_entry(node, struct fbmm_mapping, node);
-
-		if (tmp->end > addr) {
-			mapping = tmp;
-			if (tmp->start <= addr)
-				break;
-			node = node->rb_left;
-		} else {
-			node = node->rb_right;
-		}
-	}
-
-	return mapping;
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -291,7 +237,7 @@ void fbmm_register_file(pid_t pid, struct file *f,
 
 	down_write(&fbmm_procs_sem);
 
-	insert_new_mapping(proc, mapping);
+	mtree_store(&proc->mappings, mapping->start, mapping, GFP_KERNEL);
 
 	up_write(&fbmm_procs_sem);
 
@@ -330,11 +276,11 @@ int fbmm_munmap(pid_t pid, unsigned long start, unsigned long len) {
 	while (start < end) {
 		unsigned long next_start;
 
-		// Finds the first mapping where start < mapping->end, so we have to
+		// Finds the first mapping where mapping->start <= start, so we have to
 		// check if old_mapping is actually within the range
 		down_read(&fbmm_procs_sem);
-		old_mapping = find_mapping(proc, start);
-		if (!old_mapping || end <= old_mapping->start)
+		old_mapping = mt_prev(&proc->mappings, start + 1, 0);
+		if (!old_mapping || old_mapping->end <= start)
 			goto exit_locked;
 
 		next_start = old_mapping->end;
@@ -345,7 +291,7 @@ int fbmm_munmap(pid_t pid, unsigned long start, unsigned long len) {
 			// First, we have to grab a write lock
 			down_write(&fbmm_procs_sem);
 
-			rb_erase(&old_mapping->node, &proc->mappings);
+			mtree_erase(&proc->mappings, old_mapping->start);
 			drop_fbmm_file(old_mapping);
 
 			// If old_mapping->file is null, it has been deleted.
@@ -407,7 +353,7 @@ int fbmm_munmap(pid_t pid, unsigned long start, unsigned long len) {
 			new_mapping->file = old_mapping->file;
 			new_mapping->file->count++;
 
-			insert_new_mapping(proc, new_mapping);
+			mtree_store(&proc->mappings, new_mapping->start, new_mapping, GFP_KERNEL);
 
 			falloc_offset = start - old_mapping->file->original_start;
 			falloc_len = end - start;
@@ -439,7 +385,8 @@ exit_locked:
 
 void fbmm_check_exiting_proc(pid_t pid) {
 	struct fbmm_proc *proc;
-	struct rb_node *node;
+	struct fbmm_mapping *map;
+	unsigned long index;
 
 	down_read(&fbmm_procs_sem);
 	proc = mtree_erase(&fbmm_proc_mt, pid);
@@ -451,16 +398,11 @@ void fbmm_check_exiting_proc(pid_t pid) {
 	down_write(&fbmm_procs_sem);
 
 	// First, free the mappings tree
-	node = proc->mappings.rb_node;
-	while (node) {
-		struct fbmm_mapping *map = rb_entry(node, struct fbmm_mapping, node);
-		rb_erase(node, &proc->mappings);
-		node = proc->mappings.rb_node;
-
+	mt_for_each(&proc->mappings, map, index, ULONG_MAX) {
 		drop_fbmm_file(map);
-
 		kfree(map);
 	}
+	mtree_destroy(&proc->mappings);
 
 	up_write(&fbmm_procs_sem);
 
