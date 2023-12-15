@@ -10,6 +10,8 @@
 #include <linux/falloc.h>
 #include <linux/timekeeping.h>
 #include <linux/maple_tree.h>
+#include <linux/sched.h>
+#include <linux/kthread.h>
 
 enum file_based_mm_state {
 	FBMM_OFF = 0,
@@ -37,6 +39,11 @@ struct fbmm_proc {
 	char *mnt_dir_str;
 	struct path mnt_dir_path;
 	struct rb_root mappings;
+	bool in_work_queue;
+	struct list_head prealloc_file_list;
+	spinlock_t prealloc_file_lock;
+	atomic_t num_prealloc_files;
+	atomic_t refcount;
 };
 
 
@@ -56,6 +63,21 @@ static u64 num_munmaps = 0;
 
 static int fbmm_prealloc_map_populate = 1;
 
+// Stuff for the fbmm_file_create_thread
+static struct task_struct *fbmm_file_create_thread = NULL;
+static DEFINE_SPINLOCK(fbmm_work_queue_lock);
+static LIST_HEAD(fbmm_work_queue);
+
+struct fbmm_file_create_order {
+	struct fbmm_proc *proc;
+	struct list_head node;
+};
+
+struct fbmm_prealloc_entry {
+	struct file *file;
+	struct list_head node;
+};
+
 ///////////////////////////////////////////////////////////////////////////////
 // struct fbmm_proc functions
 
@@ -73,14 +95,35 @@ static struct fbmm_proc *fbmm_create_new_proc(char *mnt_dir_str, pid_t pid) {
 	ret = kern_path(mnt_dir_str, LOOKUP_DIRECTORY | LOOKUP_FOLLOW, &proc->mnt_dir_path);
 	proc->pid = pid;
 	proc->mappings = RB_ROOT;
+	proc->in_work_queue = false;
+	INIT_LIST_HEAD(&proc->prealloc_file_list);
+	spin_lock_init(&proc->prealloc_file_lock);
+	atomic_set(&proc->num_prealloc_files, 0);
+	atomic_set(&proc->refcount, 1);
 
 	return proc;
 }
 
-static void fbmm_free_proc(struct fbmm_proc *proc) {
-	kfree(proc->mnt_dir_str);
-	path_put(&proc->mnt_dir_path);
-	kfree(proc);
+static void fbmm_get_proc(struct fbmm_proc *proc) {
+	atomic_inc(&proc->refcount);
+}
+
+static void fbmm_put_proc(struct fbmm_proc *proc) {
+	struct fbmm_prealloc_entry *entry, *tmp;
+
+	// Only free the contents if the refcount becomes 0
+	if (atomic_dec_return(&proc->refcount) == 0) {
+		kfree(proc->mnt_dir_str);
+		path_put(&proc->mnt_dir_path);
+
+		list_for_each_entry_safe(entry, tmp, &proc->prealloc_file_list, node) {
+			list_del(&entry->node);
+			filp_close(entry->file, current->files);
+			kfree(entry);
+		}
+
+		kfree(proc);
+	}
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -135,6 +178,152 @@ static struct fbmm_mapping *find_mapping(struct fbmm_proc *proc, unsigned long a
 	}
 
 	return mapping;
+}
+
+///////////////////////////////////////////////////////////////////////////////
+// File allocating functions
+// TODO: This works per proc, but would probably be better for it to work
+// per MFS
+
+static int fbmm_prealloc_task(void *data) {
+	const int OPEN_FLAGS = O_EXCL | O_TMPFILE | O_RDWR;
+	const umode_t OPEN_MODE = S_IFREG | S_IRUSR | S_IWUSR;
+	const int NUM_FILES_TO_CREATE = 10;
+	struct fbmm_file_create_order *work_order;
+	struct fbmm_prealloc_entry *prealloc_entry;
+	struct fbmm_proc *proc;
+	struct file *file;
+
+    while (!kthread_should_stop()) {
+		// Read the next work order if there is one
+		spin_lock(&fbmm_work_queue_lock);
+		if (list_empty(&fbmm_work_queue))
+			goto sleep;
+
+		work_order = list_first_entry(&fbmm_work_queue, struct fbmm_file_create_order, node);
+		list_del(&work_order->node);
+		spin_unlock(&fbmm_work_queue_lock);
+
+		proc = work_order->proc;
+		kfree(work_order);
+
+		// Check if we already have a decent number of files
+		if (atomic_read(&proc->num_prealloc_files) >= NUM_FILES_TO_CREATE / 2)
+			goto put_proc;
+
+		// Create the files
+		for (int i = 0; i < NUM_FILES_TO_CREATE; i++) {
+			down_read(&fbmm_procs_sem);
+			file = file_open_root(&proc->mnt_dir_path, "", OPEN_FLAGS, OPEN_MODE);
+			up_read(&fbmm_procs_sem);
+			if (IS_ERR(file))
+				goto put_proc;
+
+			// Add the file to the proc's free list
+			prealloc_entry = kmalloc(sizeof(struct fbmm_prealloc_entry), GFP_KERNEL);
+			if (!prealloc_entry) {
+				// Using "current_cred" here is a little weird because this is
+				// a kernel thread, not the user proc that wants the file,
+				// but that param is only used to call the flush callback, which
+				// MFS's don't implement, so it should be fine.
+				filp_close(file, current->files);
+				goto put_proc;
+			}
+			prealloc_entry->file = file;
+
+			spin_lock(&proc->prealloc_file_lock);
+			list_add_tail(&prealloc_entry->node, &proc->prealloc_file_list);
+			spin_unlock(&proc->prealloc_file_lock);
+			atomic_inc(&proc->num_prealloc_files);
+		}
+
+put_proc:
+		// A reference to proc is taken when a work order is put on the queue,
+		// so we need to drop it when we leave.
+		spin_lock(&proc->prealloc_file_lock);
+		proc->in_work_queue = false;
+		spin_unlock(&proc->prealloc_file_lock);
+		fbmm_put_proc(proc);
+sleep:
+		// Go to sleep until there is more work to do
+		set_current_state(TASK_INTERRUPTIBLE);
+		schedule();
+	}
+
+	return 0;
+}
+
+static void fbmm_add_work_order(struct fbmm_proc *proc) {
+	struct fbmm_file_create_order *work_order;
+
+	if (!fbmm_file_create_thread)
+		return;
+
+	work_order = kmalloc(sizeof(struct fbmm_file_create_order), GFP_KERNEL);
+	if (!work_order)
+		return;
+
+	spin_lock(&proc->prealloc_file_lock);
+	if (proc->in_work_queue) {
+		spin_unlock(&proc->prealloc_file_lock);
+		return;
+	}
+	proc->in_work_queue = true;
+	spin_unlock(&proc->prealloc_file_lock);
+
+	work_order->proc = proc;
+	fbmm_get_proc(proc);
+
+	spin_lock(&fbmm_work_queue_lock);
+	list_add_tail(&work_order->node, &fbmm_work_queue);
+	spin_unlock(&fbmm_work_queue_lock);
+
+	wake_up_process(fbmm_file_create_thread);
+}
+
+static struct file *fbmm_get_prealloc_file(struct fbmm_proc *proc) {
+	const int RETRIES = 5;
+	struct fbmm_prealloc_entry *prealloc_entry;
+	struct file *file;
+	int orig_num_prealloc_files;
+	bool file_reserved = false;
+
+	// Try to reserve a preallocated file
+	for (int i = 0; i < RETRIES; i++) {
+		orig_num_prealloc_files = atomic_read(&proc->num_prealloc_files);
+
+		if (orig_num_prealloc_files == 0) {
+			fbmm_add_work_order(proc);
+			return NULL;
+		}
+
+		if (atomic_cmpxchg(&proc->num_prealloc_files,
+					orig_num_prealloc_files,
+					orig_num_prealloc_files - 1) == orig_num_prealloc_files)
+		{
+			file_reserved = true;
+			break;
+		}
+	}
+
+	// There is a lot of contention for the files, so fallback
+	if (!file_reserved)
+		return NULL;
+
+	spin_lock(&proc->prealloc_file_lock);
+	prealloc_entry = list_first_entry(&proc->prealloc_file_list,
+		struct fbmm_prealloc_entry, node);
+	list_del(&prealloc_entry->node);
+	spin_unlock(&proc->prealloc_file_lock);
+
+	file = prealloc_entry->file;
+	kfree(prealloc_entry);
+
+	// Should we sure up the number of files?
+	if (atomic_read(&proc->num_prealloc_files) < 3)
+		fbmm_add_work_order(proc);
+
+	return file;
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -216,19 +405,23 @@ struct file *fbmm_create_new_file(unsigned long len, unsigned long prot, int fla
 		return NULL;
 	}
 
-	down_read(&fbmm_procs_sem);
 	proc = mtree_load(&fbmm_proc_mt, current->tgid);
 	if (!proc) {
-		goto err;
+		return NULL;
 	}
 
-	path = &proc->mnt_dir_path;
-	f = file_open_root(path, "", open_flags, open_mode);
-	if (IS_ERR(f)) {
-		goto err;
+	// Try to get a preallocated file, and if that doesn't work
+	// just make one
+	f = fbmm_get_prealloc_file(proc);
+	if (!f) {
+		down_read(&fbmm_procs_sem);
+		path = &proc->mnt_dir_path;
+		f = file_open_root(path, "", open_flags, open_mode);
+		up_read(&fbmm_procs_sem);
+		if (IS_ERR(f)) {
+			return f;
+		}
 	}
-
-	up_read(&fbmm_procs_sem);
 
 	// Set the file to the correct size
 	ret = truncate_fbmm_file(f, len, flags);
@@ -244,10 +437,6 @@ struct file *fbmm_create_new_file(unsigned long len, unsigned long prot, int fla
 	spin_unlock(&stats_lock);
 
 	return f;
-
-err:
-	up_read(&fbmm_procs_sem);
-	return NULL;
 }
 
 void fbmm_register_file(pid_t pid, struct file *f,
@@ -462,7 +651,7 @@ void fbmm_check_exiting_proc(pid_t pid) {
 
 	up_write(&fbmm_procs_sem);
 
-	fbmm_free_proc(proc);
+	fbmm_put_proc(proc);
 }
 
 // Make the default mmfs dir of the dst the same as src
@@ -515,6 +704,9 @@ static ssize_t fbmm_state_store(struct kobject *kobj,
 		return ret;
 	} else if (state >= FBMM_OFF && state <= FBMM_ALL) {
 		fbmm_state = state;
+
+		if (!fbmm_file_create_thread && fbmm_state > FBMM_OFF)
+			fbmm_file_create_thread = kthread_create(fbmm_prealloc_task, NULL, "FBMM File Create");
 		return count;
 	} else {
 		fbmm_state = FBMM_OFF;
@@ -895,7 +1087,7 @@ static ssize_t fbmm_mnt_dir_write(struct file *file, const char __user *ubuf,
 		// If the previous entry stored a value, free it
 		proc = mtree_erase(&fbmm_proc_mt, task->tgid);
 		if (proc)
-			fbmm_free_proc(proc);
+			fbmm_put_proc(proc);
 	}
 	up_write(&fbmm_procs_sem);
 
