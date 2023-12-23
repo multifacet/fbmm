@@ -63,7 +63,7 @@ static vm_fault_t bwmmfs_fault(struct vm_fault *vmf)
     struct bwmmfs_inode_info * inode_info;
     struct bwmmfs_sb_info *sbi;
     struct page *page;
-    loff_t offset = vmf->address - vma->vm_start;
+    loff_t offset = vmf->address - vma->vm_start + (vma->vm_pgoff << PAGE_SHIFT);
     pte_t entry;
 
     inode_info = BWMMFS_I(inode);
@@ -121,7 +121,6 @@ static int bwmmfs_mmap(struct file *file, struct vm_area_struct *vma)
 {
     file_accessed(file);
     vma->vm_ops = &bwmmfs_vm_ops;
-    vma->vm_flags |= VM_MIXEDMAP | VM_HUGEPAGE;
 
     return 0;
 }

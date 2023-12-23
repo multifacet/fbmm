@@ -10,9 +10,9 @@ extern const struct file_operations proc_fbmm_mnt_dir;
 
 bool use_file_based_mm(pid_t pid);
 
-struct file *fbmm_create_new_file(unsigned long len, unsigned long prot, int flags);
-void fbmm_register_file(pid_t pid, struct file *f, unsigned long start,
-		unsigned long len);
+unsigned long fbmm_get_unmapped_area(unsigned long addr, unsigned long len, unsigned long pgoff, unsigned long flags);
+struct file *fbmm_get_file(unsigned long addr, unsigned long len, unsigned long prot, int flags, bool mmap, unsigned long *pgoff);
+void fbmm_populate_file(unsigned long start, unsigned long len);
 int fbmm_munmap(pid_t pid, unsigned long start, unsigned long len);
 void fbmm_check_exiting_proc(pid_t pid);
 int fbmm_copy_mnt_dir(pid_t src, pid_t dst);
@@ -23,12 +23,15 @@ inline bool use_file_based_mm(pid_t pid) {
 	return false;
 }
 
-inline struct file *fbmm_create_new_file(unsigned long len, unsigned long prot, int flags) {
+unsigned long fbmm_get_unmapped_area(unsigned long addr, unsigned long len, unsigned long pgoff, unsigned long flags) {
+	return 0;
+}
+
+inline struct file *fbmm_get_file(unsigned long addr, unsigned long len, unsigned long prot, int flags, bool mmap, unsigned long *pgoff) {
 	return NULL;
 }
 
-inline void fbmm_register_file(pid_t pid, struct file *f, unsigned long start,
-		unsigned long len)
+inline void fbmm_populate_file(unsigned long start, unsigned long len)
 {}
 
 inline int fbmm_munmap(pid_t pid, unsigned long start, unsigned long len) {

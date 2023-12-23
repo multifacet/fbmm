@@ -176,6 +176,7 @@ SYSCALL_DEFINE1(brk, unsigned long, brk)
 	unsigned long min_brk;
 	bool populate;
 	bool downgraded = false;
+	bool used_fbmm = false;
 	LIST_HEAD(uf);
 	MA_STATE(mas, &mm->mm_mt, 0, 0);
 
@@ -262,13 +263,17 @@ SYSCALL_DEFINE1(brk, unsigned long, brk)
 	if (use_file_based_mm(current->tgid)) {
 		vm_flags_t vm_flags;
 		unsigned long prot = PROT_READ | PROT_WRITE;
-		struct file *f = fbmm_create_new_file(newbrk-oldbrk, prot, 0);
+		unsigned long pgoff = 0;
+		struct file *f = fbmm_get_file(oldbrk, newbrk-oldbrk, prot, 0, false, &pgoff);
 
-		vm_flags = VM_DATA_DEFAULT_FLAGS | VM_ACCOUNT | mm->def_flags
-			| VM_SHARED | VM_MAYSHARE;
-		mmap_region(f, oldbrk, newbrk-oldbrk, vm_flags, 0, NULL);
-		fbmm_register_file(current->tgid, f, oldbrk, newbrk-oldbrk);
-	} else {
+		if (f && !IS_ERR(f)) {
+			vm_flags = VM_DATA_DEFAULT_FLAGS | VM_ACCOUNT | mm->def_flags
+				| VM_SHARED | VM_MAYSHARE;
+			mmap_region(f, oldbrk, newbrk-oldbrk, vm_flags, pgoff, NULL);
+			used_fbmm = true;
+		}
+	}
+	if (!used_fbmm) {
 		brkvma = mas_prev(&mas, mm->start_brk);
 		if (do_brk_flags(&mas, brkvma, oldbrk, newbrk-oldbrk, 0) < 0)
 			goto out;
@@ -1295,28 +1300,33 @@ unsigned long do_mmap(struct file *file, unsigned long addr,
 
 	// See if we want to use file only memory
 	if (!file && (flags & MAP_ANONYMOUS) && use_file_based_mm(current->tgid)) {
-		file = fbmm_create_new_file(len, prot, flags);
+		addr = fbmm_get_unmapped_area(addr, len, pgoff, flags);
 
-		if (file && !IS_ERR(file)) {
-			created_fbmm_file = true;
-			flags = flags & ~MAP_ANONYMOUS;
+		if (!IS_ERR_VALUE(addr)) {
+			file = fbmm_get_file(addr, len, prot, flags, true, &pgoff);
 
-			// If the caller used MAP_PRIVATE, switch it to MAP_SHARED so that
-			// the system doesn't save the writes to anonymous memory
-			if (flags & MAP_PRIVATE) {
-				flags = flags & ~MAP_PRIVATE;
-				flags = flags | MAP_SHARED;
+			if (file && !IS_ERR(file)) {
+				created_fbmm_file = true;
+				flags = flags & ~MAP_ANONYMOUS;
+
+				// If the caller used MAP_PRIVATE, switch it to MAP_SHARED so that
+				// the system doesn't save the writes to anonymous memory
+				if (flags & MAP_PRIVATE) {
+					flags = flags & ~MAP_PRIVATE;
+					flags = flags | MAP_SHARED;
+				}
+			} else {
+				pr_err("Failed to create fbmm file: %ld %px\n", (long)file, file);
+				file = NULL;
 			}
-		} else {
-			pr_err("Failed to create fbmm file: %ld\n", (long)file);
-			file = NULL;
 		}
 	}
 
 	/* Obtain the address to map to. we verify (or select) it and ensure
 	 * that it represents a valid section of the address space.
 	 */
-	addr = get_unmapped_area(file, addr, len, pgoff, flags);
+	if (!created_fbmm_file)
+		addr = get_unmapped_area(file, addr, len, pgoff, flags);
 	if (IS_ERR_VALUE(addr))
 		return addr;
 
@@ -1446,13 +1456,6 @@ unsigned long do_mmap(struct file *file, unsigned long addr,
 	     (flags & (MAP_POPULATE | MAP_NONBLOCK)) == MAP_POPULATE))
 		*populate = len;
 
-	// Because mmap_region will unmap regions that overlap with the new region,
-	// we must wait to register the new fbmm file until after it is finished.
-	// This is to prevent a fbmm file from being registered and then an overlapping
-	// region is unmapped, making the fom system think it needs to delete the new file
-	if (created_fbmm_file) {
-		fbmm_register_file(current->tgid, file, addr, len);
-	}
 	return addr;
 }
 

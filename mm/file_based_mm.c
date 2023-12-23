@@ -19,26 +19,25 @@ enum file_based_mm_state {
 	FBMM_ALL = 2
 };
 
+// It takes time to create new files and create new VMAs for mappings
+// with different files, so we want to create huge files that we can reuse
+// for different calls to mmap
+#define FBMM_DEFAULT_FILE_SIZE ((long)128 << 30)
 struct fbmm_file {
 	struct file *f;
-	unsigned long original_start; // Used to compute the offset for fallocate
-	int count;
-};
-
-// Start is inclusive, end is exclusive
-struct fbmm_mapping {
-	u64 start;
-	u64 end;
-	struct fbmm_file *file;
-
-	struct rb_node node;
+	// The starting virtual address assigned to this file (inclusive)
+	unsigned long va_start;
+	// The ending virtual address assigned to this file (exclusive)
+	unsigned long va_end;
 };
 
 struct fbmm_proc {
 	pid_t pid;
 	char *mnt_dir_str;
 	struct path mnt_dir_path;
-	struct rb_root mappings;
+	// This file exists just to be passed to get_unmapped_area in mmap
+	struct file *get_unmapped_area_file;
+	struct maple_tree files_mt;
 	bool in_work_queue;
 	struct list_head prealloc_file_list;
 	spinlock_t prealloc_file_lock;
@@ -82,8 +81,9 @@ struct fbmm_prealloc_entry {
 // struct fbmm_proc functions
 
 static struct fbmm_proc *fbmm_create_new_proc(char *mnt_dir_str, pid_t pid) {
+	const int OPEN_FLAGS = O_EXCL | O_TMPFILE | O_RDWR;
+	const umode_t OPEN_MODE = S_IFREG | S_IRUSR | S_IWUSR;
 	struct fbmm_proc *proc;
-	int ret;
 
 	proc = kmalloc(sizeof(struct fbmm_proc), GFP_KERNEL);
 	if (!proc) {
@@ -92,9 +92,13 @@ static struct fbmm_proc *fbmm_create_new_proc(char *mnt_dir_str, pid_t pid) {
 	}
 
 	proc->mnt_dir_str = mnt_dir_str;
-	ret = kern_path(mnt_dir_str, LOOKUP_DIRECTORY | LOOKUP_FOLLOW, &proc->mnt_dir_path);
+	kern_path(mnt_dir_str, LOOKUP_DIRECTORY | LOOKUP_FOLLOW, &proc->mnt_dir_path);
+	proc->get_unmapped_area_file = file_open_root(&proc->mnt_dir_path, "", OPEN_FLAGS, OPEN_MODE);
+	if (IS_ERR(proc->get_unmapped_area_file)) {
+		pr_err("fbmm_create_new_proc: Could not create the get_unmapped_area_file\n");
+	}
 	proc->pid = pid;
-	proc->mappings = RB_ROOT;
+	mt_init(&proc->files_mt);
 	proc->in_work_queue = false;
 	INIT_LIST_HEAD(&proc->prealloc_file_list);
 	spin_lock_init(&proc->prealloc_file_lock);
@@ -124,60 +128,6 @@ static void fbmm_put_proc(struct fbmm_proc *proc) {
 
 		kfree(proc);
 	}
-}
-
-///////////////////////////////////////////////////////////////////////////////
-// struct fbmm_mapping functions
-
-static void insert_new_mapping(struct fbmm_proc *proc, struct fbmm_mapping *new_map) {
-	struct rb_node **new = &(proc->mappings.rb_node);
-	struct rb_node *parent = NULL;
-
-	while (*new) {
-		struct fbmm_mapping *cur = rb_entry(*new, struct fbmm_mapping, node);
-
-		// Check for an overlap
-		if ((new_map->start >= cur->start && new_map->start < cur->end) ||
-			(new_map->end > cur->start && new_map->end <= cur->end)) {
-			pr_err("insert_new_mapping: Attempting to insert overlapping mapping\n");
-			pr_err("insert_new_mapping: old mapping %llx %llx\n",
-				cur->start, cur->end);
-			pr_err("insert_new_mapping: new mapping %llx %llx\n",
-				new_map->start, new_map->end);
-			BUG();
-		}
-
-		parent = *new;
-		if (new_map->start < cur->start)
-			new = &((*new)->rb_left);
-		else
-			new = &((*new)->rb_right);
-	}
-
-	rb_link_node(&new_map->node, parent, new);
-	rb_insert_color(&new_map->node, &proc->mappings);
-}
-
-// Returns the first mapping in proc where addr < mapping->end, NULL if none exists.
-// Mostly taken from find_vma
-static struct fbmm_mapping *find_mapping(struct fbmm_proc *proc, unsigned long addr) {
-	struct fbmm_mapping *mapping = NULL;
-	struct rb_node *node = proc->mappings.rb_node;
-
-	while (node) {
-		struct fbmm_mapping *tmp = rb_entry(node, struct fbmm_mapping, node);
-
-		if (tmp->end > addr) {
-			mapping = tmp;
-			if (tmp->start <= addr)
-				break;
-			node = node->rb_left;
-		} else {
-			node = node->rb_right;
-		}
-	}
-
-	return mapping;
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -327,39 +277,10 @@ static struct file *fbmm_get_prealloc_file(struct fbmm_proc *proc) {
 ///////////////////////////////////////////////////////////////////////////////
 // Helper functions
 
-// Most of this is taken from do_sys_truncate in fs/open.c
-static int truncate_fbmm_file(struct file *f, unsigned long len, int flags) {
-	struct inode *inode;
-	struct dentry *dentry;
-	int error;
-
-	dentry = f->f_path.dentry;
-	inode = dentry->d_inode;
-
-	if ((flags & MAP_POPULATE) && fbmm_prealloc_map_populate) {
-		error = vfs_truncate(&f->f_path, len);
-		if (!error)
-			error = vfs_fallocate(f, 0, 0, len);
-	} else {
-		sb_start_write(inode->i_sb);
-		error = security_path_truncate(&f->f_path);
-		if (!error)
-			error = do_truncate(file_mnt_user_ns(f), dentry, len,
-					    ATTR_MTIME | ATTR_CTIME, f);
-		sb_end_write(inode->i_sb);
-	}
-
-	return error;
-}
-
-static void drop_fbmm_file(struct fbmm_mapping *map) {
-	map->file->count--;
-	if (map->file->count <= 0) {
-		filp_close(map->file->f, current->files);
-		fput(map->file->f);
-		kfree(map->file);
-		map->file = NULL;
-	}
+static void drop_fbmm_file(struct fbmm_file *file) {
+	filp_close(file->f, current->files);
+	fput(file->f);
+	kfree(file);
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -378,15 +299,48 @@ bool use_file_based_mm(pid_t pid) {
 	return false;
 }
 
-struct file *fbmm_create_new_file(unsigned long len, unsigned long prot, int flags) {
+unsigned long fbmm_get_unmapped_area(unsigned long addr, unsigned long len,
+		unsigned long pgoff, unsigned long flags)
+{
+	struct fbmm_proc *proc;
+
+	proc = mtree_load(&fbmm_proc_mt, current->tgid);
+	if (!proc) {
+		return -EINVAL;
+	}
+
+	return get_unmapped_area(proc->get_unmapped_area_file, addr, len, pgoff, flags);
+}
+
+struct file *fbmm_get_file(unsigned long addr, unsigned long len,
+		unsigned long prot, int flags, bool mmap, unsigned long *pgoff) {
 	struct file *f;
+	struct fbmm_file *fbmm_file;
 	struct fbmm_proc *proc;
 	struct path *path;
 	int open_flags = O_EXCL | O_TMPFILE;
+	unsigned long truncate_len;
 	umode_t open_mode = S_IFREG;
 	s64 ret = 0;
 	u64 start_time = rdtsc();
 	u64 end_time;
+
+	proc = mtree_load(&fbmm_proc_mt, current->tgid);
+	if (!proc) {
+		return NULL;
+	}
+
+	// Does a file exist that will already fit this mmap call?
+	fbmm_file = mt_prev(&proc->files_mt, addr + 1, 0);
+	if (fbmm_file) {
+		// Just see if this mmap will fit inside the file.
+		// We don't need to check if other mappings in the file
+		// overlap because get_unmapped_area should have done that already.
+		if (fbmm_file->va_start <= addr && addr + len <= fbmm_file->va_end) {
+			f = fbmm_file->f;
+			goto end;
+		}
+	}
 
 	// Determine what flags to use for the call to open
 	if (prot & PROT_EXEC)
@@ -403,14 +357,9 @@ struct file *fbmm_create_new_file(unsigned long len, unsigned long prot, int fla
 		return NULL;
 	}
 
-	proc = mtree_load(&fbmm_proc_mt, current->tgid);
-	if (!proc) {
-		return NULL;
-	}
-
 	// Try to get a preallocated file, and if that doesn't work
 	// just make one
-	f = fbmm_get_prealloc_file(proc);
+	f = NULL;//fbmm_get_prealloc_file(proc);
 	if (!f) {
 		path = &proc->mnt_dir_path;
 		f = file_open_root(path, "", open_flags, open_mode);
@@ -420,12 +369,40 @@ struct file *fbmm_create_new_file(unsigned long len, unsigned long prot, int fla
 	}
 
 	// Set the file to the correct size
-	ret = truncate_fbmm_file(f, len, flags);
+	if (len < FBMM_DEFAULT_FILE_SIZE)
+		truncate_len = FBMM_DEFAULT_FILE_SIZE;
+	else
+		truncate_len = len;
+	ret = vfs_truncate(&f->f_path, truncate_len);
 	if (ret) {
 		filp_close(f, current->files);
 		return (struct file *)ret;
 	}
 
+	// Create a new struct fbmm_file for this file
+	fbmm_file = kmalloc(sizeof(struct fbmm_file), GFP_KERNEL);
+	if (!fbmm_file) {
+		filp_close(f, current->files);
+		return NULL;
+	}
+	fbmm_file->f = f;
+	if (mmap) {
+		// Since VAs in the mmap region typically grow down,
+		// this mapping will be the "end" of the file
+		fbmm_file->va_end = addr + len;
+		fbmm_file->va_start = fbmm_file->va_end - truncate_len;
+	} else {
+		// VAs in the heap region grow up
+		fbmm_file->va_start = addr;
+		fbmm_file->va_end = addr + truncate_len;
+	}
+
+	mtree_store(&proc->files_mt, fbmm_file->va_start, fbmm_file, GFP_KERNEL);
+
+end:
+	if (f && !IS_ERR(f)) {
+		*pgoff = (addr - fbmm_file->va_start) >> PAGE_SHIFT;
+	}
 	end_time = rdtsc();
 	spin_lock(&stats_lock);
 	file_create_time += end_time - start_time;
@@ -435,12 +412,11 @@ struct file *fbmm_create_new_file(unsigned long len, unsigned long prot, int fla
 	return f;
 }
 
-void fbmm_register_file(pid_t pid, struct file *f,
-		unsigned long start, unsigned long len)
+void fbmm_populate_file(unsigned long start, unsigned long len)
 {
 	struct fbmm_proc *proc;
-	struct fbmm_mapping *mapping = NULL;
 	struct fbmm_file *file = NULL;
+	loff_t offset;
 	u64 start_time = rdtsc();
 	u64 end_time;
 
@@ -450,31 +426,13 @@ void fbmm_register_file(pid_t pid, struct file *f,
 		BUG();
 	}
 
-	file = kmalloc(sizeof(struct fbmm_file), GFP_KERNEL);
-	if (!file)
-		goto err;
-
-	file->f = f;
-	if (!file->f)
-		goto err;
-	file->count = 1;
-	file->original_start = start;
-
-	// Create the new mapping
-	mapping = kmalloc(sizeof(struct fbmm_mapping), GFP_KERNEL);
-	if (!mapping) {
-		pr_err("fbmm_create_new_file: not enough memory for mapping\n");
-		goto err;
+	file = mt_prev(&proc->files_mt, start, 0);
+	if (!file || file->va_end <= start) {
+		BUG();
 	}
-	mapping->start = start;
-	mapping->end = start + len;
-	mapping->file = file;
 
-	down_write(&fbmm_procs_sem);
-
-	insert_new_mapping(proc, mapping);
-
-	up_write(&fbmm_procs_sem);
+	offset = start - file->va_start;
+	vfs_fallocate(file->f, 0, offset, len);
 
 	end_time = rdtsc();
 	spin_lock(&stats_lock);
@@ -483,18 +441,13 @@ void fbmm_register_file(pid_t pid, struct file *f,
 	spin_unlock(&stats_lock);
 
 	return;
-err:
-	if (file)
-		kfree(file);
 }
 
 int fbmm_munmap(pid_t pid, unsigned long start, unsigned long len) {
 	struct fbmm_proc *proc = NULL;
-	struct fbmm_mapping *old_mapping = NULL;
+	struct fbmm_file *fbmm_file = NULL;
 	unsigned long end = start + len;
 	unsigned long falloc_offset, falloc_len;
-	struct file *falloc_file = NULL;
-	bool do_falloc = false;
 	int ret = 0;
 	u64 start_time = rdtsc();
 	u64 end_time;
@@ -509,101 +462,28 @@ int fbmm_munmap(pid_t pid, unsigned long start, unsigned long len) {
 	while (start < end) {
 		unsigned long next_start;
 
-		// Finds the first mapping where start < mapping->end, so we have to
-		// check if old_mapping is actually within the range
-		down_read(&fbmm_procs_sem);
-		old_mapping = find_mapping(proc, start);
-		if (!old_mapping || end <= old_mapping->start)
-			goto exit_locked;
+		// Finds the first mapping where file->va_start <= start, so we have to
+		// check this file is actually within the range
+		fbmm_file = mt_prev(&proc->files_mt, start + 1, 0);
+		if (!fbmm_file || fbmm_file->va_end <= start)
+			goto exit;
 
-		next_start = old_mapping->end;
-		up_read(&fbmm_procs_sem);
+		next_start = fbmm_file->va_end;
 
-		// If the unmap range entirely contains the mapping, we can simply delete it
-		if (start <= old_mapping->start && old_mapping->end <= end) {
-			// First, we have to grab a write lock
-			down_write(&fbmm_procs_sem);
-
-			rb_erase(&old_mapping->node, &proc->mappings);
-			drop_fbmm_file(old_mapping);
-
-			// If old_mapping->file is null, it has been deleted.
-			// Otherwise, we should punch a hole in this mapping
-			if (old_mapping->file) {
-				falloc_offset =
-					old_mapping->start - old_mapping->file->original_start;
-				falloc_len = old_mapping->end - old_mapping->start;
-				falloc_file = old_mapping->file->f;
-				do_falloc = true;
-			}
-
-			kfree(old_mapping);
-
-			up_write(&fbmm_procs_sem);
-		}
-		// If the unmap range takes only the end of the mapping, truncate the file
-		else if (start < old_mapping->end && old_mapping->end <= end) {
-			down_write(&fbmm_procs_sem);
-
-			falloc_offset = start - old_mapping->file->original_start;
-			falloc_len = old_mapping->end - start;
-			old_mapping->end = start;
-			falloc_file = old_mapping->file->f;
-			do_falloc = true;
-
-			up_write(&fbmm_procs_sem);
-		}
-		// If the unmap range trims off only the beginning of the mapping,
-		// deallocate the beginning
-		else if (start <= old_mapping->start && old_mapping->start < end) {
-			down_write(&fbmm_procs_sem);
-
-			falloc_offset = old_mapping->start - old_mapping->file->original_start;
-			falloc_len = end - old_mapping->start;
-			old_mapping->start = end;
-			falloc_file = old_mapping->file->f;
-			do_falloc = true;
-
-			up_write(&fbmm_procs_sem);
-		}
-		// If the unmap range is entirely within a mapping, poke a hole
-		// in the middle of the file and create a new mapping to represent
-		// the split
-		else if (old_mapping->start < start && end < old_mapping->end) {
-			struct fbmm_mapping *new_mapping = kmalloc(sizeof(struct fbmm_mapping), GFP_KERNEL);
-
-			if (!new_mapping) {
-				pr_err("fbmm_munmap: can't allocate new fbmm_mapping\n");
-				return -ENOMEM;
-			}
-
-			new_mapping->start = end;
-			new_mapping->end = old_mapping->end;
-
-			down_write(&fbmm_procs_sem);
-			old_mapping->end = start;
-
-			new_mapping->file = old_mapping->file;
-			new_mapping->file->count++;
-
-			insert_new_mapping(proc, new_mapping);
-
-			falloc_offset = start - old_mapping->file->original_start;
+		falloc_offset = start - fbmm_file->va_start;
+		if (fbmm_file->va_end <= end)
+			falloc_len = fbmm_file->va_end - start;
+		else
 			falloc_len = end - start;
-			falloc_file = old_mapping->file->f;
-			do_falloc = true;
-			up_write(&fbmm_procs_sem);
-		}
 
-		if (do_falloc) {
-			ret = vfs_fallocate(falloc_file,
-					FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE,
-					falloc_offset, falloc_len);
-		}
+		ret = vfs_fallocate(fbmm_file->f,
+				FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE,
+				falloc_offset, falloc_len);
 
 		start = next_start;
 	}
 
+exit:
 	end_time = rdtsc();
 	spin_lock(&stats_lock);
 	munmap_time += end_time - start_time;
@@ -611,35 +491,22 @@ int fbmm_munmap(pid_t pid, unsigned long start, unsigned long len) {
 	spin_unlock(&stats_lock);
 
 	return ret;
-exit_locked:
-	up_read(&fbmm_procs_sem);
-	return ret;
 }
 
 void fbmm_check_exiting_proc(pid_t pid) {
 	struct fbmm_proc *proc;
-	struct rb_node *node;
+	struct fbmm_file *file;
+	unsigned long index = 0;
 
 	proc = mtree_erase(&fbmm_proc_mt, pid);
 
 	if (!proc)
 		return;
 
-	down_write(&fbmm_procs_sem);
-
-	// First, free the mappings tree
-	node = proc->mappings.rb_node;
-	while (node) {
-		struct fbmm_mapping *map = rb_entry(node, struct fbmm_mapping, node);
-		rb_erase(node, &proc->mappings);
-		node = proc->mappings.rb_node;
-
-		drop_fbmm_file(map);
-
-		kfree(map);
+	mt_for_each(&proc->files_mt, file, index, ULONG_MAX) {
+		drop_fbmm_file(file);
 	}
-
-	up_write(&fbmm_procs_sem);
+	mtree_destroy(&proc->files_mt);
 
 	fbmm_put_proc(proc);
 }
