@@ -204,16 +204,18 @@ static long tieredmmfs_free_range(struct inode *inode, loff_t offset, loff_t len
     struct tieredmmfs_sb_info *sbi = FTFS_SB(inode->i_sb);
     struct tieredmmfs_inode_info *inode_info = FTFS_I(inode);
     struct rb_node *node, *next_node;
-    struct tieredmmfs_page *page;
+    struct tieredmmfs_page *page = NULL;
+    u64 cur_offset = offset;
     u64 page_offset = offset >> sbi->page_shift;
     u64 num_pages = len >> sbi->page_shift;
 
     write_lock(&inode_info->map_lock);
-    // TODO: Change this to instead of needing the page at the offset,
-    // just find the first mapping with an offset >= the requested offset.
-    page = tieredmmfs_find_page(&inode_info->page_maps, offset);
+    while (!page && cur_offset < offset + len) {
+        page = tieredmmfs_find_page(&inode_info->page_maps, cur_offset);
+        cur_offset += sbi->page_size;
+    }
     if (!page) {
-        return 0;
+        goto unlock;
     }
     node = &page->node;
 
@@ -237,6 +239,7 @@ static long tieredmmfs_free_range(struct inode *inode, loff_t offset, loff_t len
         page = container_of(node, struct tieredmmfs_page, node);
     }
 
+unlock:
     write_unlock(&inode_info->map_lock);
 
     return 0;
