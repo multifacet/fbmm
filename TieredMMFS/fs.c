@@ -855,7 +855,6 @@ static int tieredmmfs_mmap(struct file *file, struct vm_area_struct *vma)
 {
     file_accessed(file); // TODO: probably don't need this
     vma->vm_ops = &tieredmmfs_vm_ops;
-    vma->vm_flags |= VM_MIXEDMAP | VM_HUGEPAGE;
 
     return 0;
 }

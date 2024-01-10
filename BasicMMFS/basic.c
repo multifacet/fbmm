@@ -109,6 +109,7 @@ static vm_fault_t basicmmfs_fault(struct vm_fault *vmf)
     struct basicmmfs_inode_info *inode_info;
     struct basicmmfs_sb_info *sbi;
     struct page *page;
+    u64 pgoff = ((vmf->address - vma->vm_start) >> PAGE_SHIFT) + vma->vm_pgoff;
     vm_fault_t ret = 0;
     pte_t entry;
 
@@ -116,7 +117,7 @@ static vm_fault_t basicmmfs_fault(struct vm_fault *vmf)
     sbi = BMMFS_SB(inode->i_sb);
 
     // Get the page if it already allocated
-    page = mtree_load(&inode_info->mt, vmf->pgoff);
+    page = mtree_load(&inode_info->mt, pgoff);
 
     // For now, do nothing if the pte already exists.
     // TODO: I'm not sure if this is right...
@@ -135,7 +136,7 @@ static vm_fault_t basicmmfs_fault(struct vm_fault *vmf)
 
     // Try to allocate the page if it hasn't been already (e.g. from fallocate)
     if (!page) {
-        page = basicmmfs_alloc_page(inode_info, sbi, vmf->pgoff);
+        page = basicmmfs_alloc_page(inode_info, sbi, pgoff);
         if (!page) {
             ret = VM_FAULT_OOM;
             goto unlock;
@@ -157,6 +158,7 @@ static vm_fault_t basicmmfs_fault(struct vm_fault *vmf)
     update_mmu_cache(vma, vmf->address, vmf->pte);
     vmf->page = page;
     get_page(page);
+    ret = VM_FAULT_NOPAGE;
 
 unlock:
     pte_unmap_unlock(vmf->pte, vmf->ptl);
