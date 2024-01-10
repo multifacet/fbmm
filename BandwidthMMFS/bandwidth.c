@@ -158,7 +158,7 @@ const struct file_operations bwmmfs_file_operations = {
     .splice_read = generic_file_splice_read,
     .splice_write = iter_file_splice_write,
     .llseek = generic_file_llseek,
-    .get_unmapped_area = thp_get_unmapped_area,
+    .get_unmapped_area = generic_get_unmapped_area_topdown,
     .fallocate = bwmmfs_fallocate,
 };
 

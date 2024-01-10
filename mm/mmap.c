@@ -1787,6 +1787,7 @@ generic_get_unmapped_area_topdown(struct file *filp, unsigned long addr,
 
 	return addr;
 }
+EXPORT_SYMBOL(generic_get_unmapped_area_topdown);
 
 #ifndef HAVE_ARCH_UNMAPPED_AREA_TOPDOWN
 unsigned long
