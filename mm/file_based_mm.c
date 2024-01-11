@@ -52,12 +52,13 @@ static DECLARE_RWSEM(fbmm_procs_sem);
 // An entry for a pid exists in this tree iff the process of that pid is using FBMM.
 static struct maple_tree fbmm_proc_mt = MTREE_INIT(fbmm_proc_mt, 0);
 
-static atomic64_t file_create_time = ATOMIC_INIT(0);
-static atomic64_t num_file_creates = ATOMIC_INIT(0);
-static atomic64_t file_register_time = ATOMIC_INIT(0);
-static atomic64_t num_file_registers = ATOMIC_INIT(0);
-static atomic64_t munmap_time = ATOMIC_INIT(0);
-static atomic64_t num_munmaps = ATOMIC_INIT(0);
+static DEFINE_SPINLOCK(stats_lock);
+static u64 file_create_time = 0;
+static u64 num_file_creates = 0;
+static u64 file_register_time = 0;
+static u64 num_file_registers = 0;
+static u64 munmap_time = 0;
+static u64 num_munmaps = 0;
 
 static int fbmm_prealloc_map_populate = 1;
 
@@ -402,11 +403,11 @@ end:
 	if (f && !IS_ERR(f)) {
 		*pgoff = (addr - fbmm_file->va_start) >> PAGE_SHIFT;
 	}
-
-	atomic64_inc(&num_file_creates);
 	end_time = rdtsc();
-
-	atomic64_add(end_time - start_time, &file_create_time);
+	spin_lock(&stats_lock);
+	file_create_time += end_time - start_time;
+	num_file_creates++;
+	spin_unlock(&stats_lock);
 
 	return f;
 }
@@ -433,10 +434,11 @@ void fbmm_populate_file(unsigned long start, unsigned long len)
 	offset = start - file->va_start;
 	vfs_fallocate(file->f, 0, offset, len);
 
-	atomic64_inc(&num_file_registers);
 	end_time = rdtsc();
-
-	atomic64_add(end_time - start_time, &file_register_time);
+	spin_lock(&stats_lock);
+	file_register_time += end_time - start_time;
+	num_file_registers++;
+	spin_unlock(&stats_lock);
 
 	return;
 }
@@ -482,10 +484,11 @@ int fbmm_munmap(pid_t pid, unsigned long start, unsigned long len) {
 	}
 
 exit:
-	atomic64_inc(&num_munmaps);
 	end_time = rdtsc();
-
-	atomic64_add(end_time - start_time, &munmap_time);
+	spin_lock(&stats_lock);
+	munmap_time += end_time - start_time;
+	num_munmaps++;
+	spin_unlock(&stats_lock);
 
 	return ret;
 }
@@ -578,22 +581,22 @@ static ssize_t fbmm_stats_show(struct kobject *kobj,
     u64 avg_munmap_time = 0;
     ssize_t count;
 
-    if (atomic64_read(&num_file_creates) != 0) {
-        avg_create_time = atomic64_read(&file_create_time) / atomic64_read(&num_file_creates);
+    if (num_file_creates != 0) {
+        avg_create_time = file_create_time / num_file_creates;
     }
-    if (atomic64_read(&num_file_registers) != 0) {
-        avg_register_time = atomic64_read(&file_register_time) / atomic64_read(&num_file_registers);
+    if (num_file_registers != 0) {
+        avg_register_time = file_register_time / num_file_registers;
     }
-    if (atomic64_read(&num_munmaps) != 0) {
-        avg_munmap_time = atomic64_read(&munmap_time) / atomic64_read(&num_munmaps);
+    if (num_munmaps != 0) {
+        avg_munmap_time = munmap_time / num_munmaps;
     }
 
-    count = sprintf(buf, "file create times: %lld %lld %lld\n", atomic64_read(&file_create_time),
-        atomic64_read(&num_file_creates), avg_create_time);
-    count += sprintf(&buf[count], "file register times: %lld %lld %lld\n", atomic64_read(&file_register_time),
-        atomic64_read(&num_file_registers), avg_register_time);
-    count += sprintf(&buf[count], "munmap times: %lld %lld %lld\n", atomic64_read(&munmap_time),
-        atomic64_read(&num_munmaps), avg_munmap_time);
+    count = sprintf(buf, "file create times: %lld %lld %lld\n", file_create_time,
+        num_file_creates, avg_create_time);
+    count += sprintf(&buf[count], "file register times: %lld %lld %lld\n", file_register_time,
+        num_file_registers, avg_register_time);
+    count += sprintf(&buf[count], "munmap times: %lld %lld %lld\n", munmap_time,
+        num_munmaps, avg_munmap_time);
 
     return count;
 }
@@ -602,12 +605,12 @@ static ssize_t fbmm_stats_store(struct kobject *kobj,
 		struct kobj_attribute *attr,
 		const char *buf, size_t count)
 {
-	atomic64_set(&file_create_time, 0);
-	atomic64_set(&num_file_creates, 0);
-	atomic64_set(&file_register_time, 0);
-	atomic64_set(&num_file_registers, 0);
-	atomic64_set(&munmap_time, 0);
-	atomic64_set(&num_munmaps, 0);
+	file_create_time = 0;
+	num_file_creates = 0;
+	file_register_time = 0;
+	num_file_registers = 0;
+	munmap_time = 0;
+	num_munmaps = 0;
 	return count;
 }
 static struct kobj_attribute fbmm_stats_attribute =
