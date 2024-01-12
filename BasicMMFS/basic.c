@@ -152,6 +152,7 @@ static vm_fault_t basicmmfs_fault(struct vm_fault *vmf)
     }
 
     page_add_file_rmap(page, vma, false);
+    percpu_counter_inc(&vma->vm_mm->rss_stat[MM_FILEPAGES]);
     set_pte_at(vma->vm_mm, vmf->address, vmf->pte, entry);
 
     // No need to invalidate - it was non-present before
@@ -175,7 +176,6 @@ static int basicmmfs_mmap(struct file *file, struct vm_area_struct *vma)
 {
     file_accessed(file);
     vma->vm_ops = &basicmmfs_vm_ops;
-    vma->vm_flags |= VM_MIXEDMAP | VM_HUGEPAGE;
 
     return 0;
 }
