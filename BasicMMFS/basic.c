@@ -78,7 +78,7 @@ void basicmmfs_return_page(struct page *page, struct basicmmfs_sb_info *sbi)
     // that seems to have been handled by the unmapping code?
 
     // Add the page back to the free list
-    list_add_tail(&page->lru, &sbi->active_list);
+    list_add_tail(&page->lru, &sbi->free_list);
     sbi->free_pages++;
 
     spin_unlock(&sbi->lock);
