@@ -213,7 +213,7 @@ const struct file_operations basicmmfs_file_operations = {
     .splice_read	= generic_file_splice_read,
     .splice_write	= iter_file_splice_write,
     .llseek		= generic_file_llseek,
-    .get_unmapped_area	= thp_get_unmapped_area,
+    .get_unmapped_area	= generic_get_unmapped_area_topdown,
     .fallocate = basicmmfs_fallocate,
 };
 
@@ -375,7 +375,7 @@ static int basicmmfs_fill_super(struct super_block *sb, struct fs_context *fc)
 {
     struct inode *inode;
     struct basicmmfs_sb_info *sbi = kzalloc(sizeof(struct basicmmfs_sb_info), GFP_KERNEL);
-    u64 nr_pages = 128 * 1024;
+    u64 nr_pages = *(u64*)fc->fs_private;
     u64 alloc_size = 1024;
 
     if (!sbi) {
@@ -419,20 +419,45 @@ static int basicmmfs_get_tree(struct fs_context *fc)
 }
 
 enum basicmmfs_param {
-    Opt_maxsize,
+    Opt_numpages,
 };
 
 const struct fs_parameter_spec basicmmfs_fs_parameters[] = {
-    fsparam_u64("maxsize", Opt_maxsize),
+    fsparam_u64("numpages", Opt_numpages),
+	{},
 };
 
 static int basicmmfs_parse_param(struct fs_context *fc, struct fs_parameter *param)
 {
+    struct fs_parse_result result;
+    u64 *num_pages = (u64*)fc->fs_private;
+    int opt;
+
+    opt = fs_parse(fc, basicmmfs_fs_parameters, param, &result);
+	if (opt < 0) {
+		/*
+		 * We might like to report bad mount options here;
+		 * but traditionally ramfs has ignored all mount options,
+		 * and as it is used as a !CONFIG_SHMEM simple substitute
+		 * for tmpfs, better continue to ignore other mount options.
+		 */
+		if (opt == -ENOPARAM)
+			opt = 0;
+		return opt;
+	}
+
+    switch(opt) {
+	case Opt_numpages:
+		*num_pages = result.uint_64;
+		break;
+	};
+
     return 0;
 }
 
 static void basicmmfs_free_fc(struct fs_context *fc)
 {
+	kfree(fc->fs_private);
 }
 
 static const struct fs_context_operations basicmmfs_context_ops = {
@@ -445,6 +470,9 @@ int basicmmfs_init_fs_context(struct fs_context *fc)
 {
     fc->ops = &basicmmfs_context_ops;
 
+    fc->fs_private = kzalloc(sizeof(u64), GFP_KERNEL);
+	// Set a default number of pages to use
+	*(u64*)fc->fs_private = 128 * 1024;
     return 0;
 }
 
