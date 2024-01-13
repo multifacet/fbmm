@@ -17,7 +17,10 @@ struct basicmmfs_sb_info {
 
 struct basicmmfs_inode_info {
     // Maple tree mapping the page offset to the folio mapped to that offset
-    struct maple_tree mt;
+    // Used to hold preallocated pages that haven't been mapped yet
+    struct maple_tree falloc_mt;
+    // The first virtual address this file is associated with.
+    u64 file_va_start;
 };
 
 #endif //BASIC_MMFS_H

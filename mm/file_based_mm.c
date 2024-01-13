@@ -504,6 +504,9 @@ void fbmm_check_exiting_proc(pid_t pid) {
 		return;
 
 	mt_for_each(&proc->files_mt, file, index, ULONG_MAX) {
+		vfs_fallocate(file->f,
+				FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE,
+				0, FBMM_DEFAULT_FILE_SIZE);
 		drop_fbmm_file(file);
 	}
 	mtree_destroy(&proc->files_mt);
