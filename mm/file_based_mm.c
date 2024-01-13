@@ -446,8 +446,9 @@ void fbmm_populate_file(unsigned long start, unsigned long len)
 int fbmm_munmap(pid_t pid, unsigned long start, unsigned long len) {
 	struct fbmm_proc *proc = NULL;
 	struct fbmm_file *fbmm_file = NULL;
+	struct fbmm_file *prev_file = NULL;
 	unsigned long end = start + len;
-	unsigned long falloc_offset, falloc_len;
+	unsigned long falloc_start_offset, falloc_end_offset, falloc_len;
 	int ret = 0;
 	u64 start_time = rdtsc();
 	u64 end_time;
@@ -457,30 +458,48 @@ int fbmm_munmap(pid_t pid, unsigned long start, unsigned long len) {
 	if (!proc)
 		return 0;
 
+	// Finds the last (by va_start) mapping where file->va_start <= start, so we have to
+	// check this file is actually within the range
+	fbmm_file = mt_prev(&proc->files_mt, start + 1, 0);
+	if (!fbmm_file || fbmm_file->va_end <= start)
+		goto exit;
+
+	// Since the ranges overlap, we have to keep going backwards until we
+	// the first mapping where file->va_start <= start and file->va_end > start
+	while (1) {
+		prev_file = mt_prev(&proc->files_mt, fbmm_file->va_start, 0);
+		if (!prev_file || prev_file->va_end <= start)
+			break;
+		fbmm_file = prev_file;
+	}
+
 	// a munmap call can span multiple memory ranges, so we might have to do this
 	// multiple times
-	while (start < end) {
-		unsigned long next_start;
-
-		// Finds the first mapping where file->va_start <= start, so we have to
-		// check this file is actually within the range
-		fbmm_file = mt_prev(&proc->files_mt, start + 1, 0);
-		if (!fbmm_file || fbmm_file->va_end <= start)
-			goto exit;
-
-		next_start = fbmm_file->va_end;
-
-		falloc_offset = start - fbmm_file->va_start;
-		if (fbmm_file->va_end <= end)
-			falloc_len = fbmm_file->va_end - start;
+	while (fbmm_file) {
+		// Calculate the offset from the start of the file where
+		// we should start freeing
+		if (start > fbmm_file->va_start)
+			falloc_start_offset = start - fbmm_file->va_start;
 		else
-			falloc_len = end - start;
+			falloc_start_offset = 0;
+
+		// Calculate the offset from the start of the file where
+		// we should stop freeing
+		if (fbmm_file->va_end <= end)
+			falloc_end_offset = fbmm_file->va_end - fbmm_file->va_start;
+		else
+			falloc_end_offset = end - fbmm_file->va_start;
+
+		BUG_ON(falloc_start_offset > falloc_end_offset);
+		falloc_len = falloc_end_offset - falloc_start_offset;
 
 		ret = vfs_fallocate(fbmm_file->f,
 				FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE,
-				falloc_offset, falloc_len);
+				falloc_start_offset, falloc_len);
 
-		start = next_start;
+		fbmm_file = mt_next(&proc->files_mt, fbmm_file->va_start, ULONG_MAX);
+		if (!fbmm_file || fbmm_file->va_end <= start)
+			break;
 	}
 
 exit:

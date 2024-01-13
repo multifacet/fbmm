@@ -2491,8 +2491,6 @@ do_mas_align_munmap(struct ma_state *mas, struct vm_area_struct *vma,
 	remove_mt(mm, &mas_detach);
 	__mt_destroy(&mt_detach);
 
-	fbmm_munmap(current->tgid, start, end - start);
-
 	validate_mm(mm);
 	return downgrade ? 1 : 0;
 
@@ -2544,6 +2542,7 @@ int do_mas_munmap(struct ma_state *mas, struct mm_struct *mm,
 	if (!vma)
 		return 0;
 
+	fbmm_munmap(current->tgid, start, end - start);
 	return do_mas_align_munmap(mas, vma, mm, start, end, uf, downgrade);
 }
 

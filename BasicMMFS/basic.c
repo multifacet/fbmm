@@ -121,14 +121,13 @@ void basicmmfs_free_range(struct inode *inode, u64 offset, loff_t len)
     u64 cur_addr = start_addr;
     u64 cur_end;
 
-    walk_ops.pte_entry = basicmmfs_free_pte;
-
 	while (cur_addr < end_addr) {
         vma = find_vma(mm, cur_addr);
         if (!vma)
             break;
+
         // Make sure this VMA maps this file
-        if (vma->vm_file->f_inode != inode) {
+        if (!vma->vm_file || vma->vm_file->f_inode != inode) {
             cur_addr = vma->vm_end;
             continue;
         }
