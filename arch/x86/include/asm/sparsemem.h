@@ -18,14 +18,14 @@
 
 #ifdef CONFIG_X86_32
 # ifdef CONFIG_X86_PAE
-#  define SECTION_SIZE_BITS	29
+#  define SECTION_SIZE_BITS	31
 #  define MAX_PHYSMEM_BITS	36
 # else
-#  define SECTION_SIZE_BITS	26
+#  define SECTION_SIZE_BITS	31
 #  define MAX_PHYSMEM_BITS	32
 # endif
 #else /* CONFIG_X86_32 */
-# define SECTION_SIZE_BITS	27 /* matt - 128 is convenient right now */
+# define SECTION_SIZE_BITS	31 /* matt - 128 is convenient right now */
 # define MAX_PHYSMEM_BITS	(pgtable_l5_enabled() ? 52 : 46)
 #endif
 
