@@ -222,9 +222,7 @@ static long contigmmfs_fallocate(struct file *file, int mode, loff_t offset, lof
 
         // Clear the range tlb as necessary
         if (inode_info->mm && inode_info->mm->badger_trap_en && folio_nr_pages(region->folio) >= 8) {
-            spin_lock(&inode_info->mm->range_tlb_lock);
             tlb_entry = mtree_erase(&inode_info->mm->all_ranges, region->va_start);
-            spin_unlock(&inode_info->mm->range_tlb_lock);
 
             if (tlb_entry)
                 kfree(tlb_entry);
