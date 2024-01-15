@@ -220,14 +220,6 @@ static long contigmmfs_fallocate(struct file *file, int mode, loff_t offset, lof
         sbi->num_pages -= folio_nr_pages(region->folio);
         folio_put(region->folio);
 
-        // Clear the range tlb as necessary
-        if (inode_info->mm && inode_info->mm->badger_trap_en && folio_nr_pages(region->folio) >= 8) {
-            tlb_entry = mtree_erase(&inode_info->mm->all_ranges, region->va_start);
-
-            if (tlb_entry)
-                kfree(tlb_entry);
-        }
-
         next_region = mt_next(&inode_info->mt, region->va_start, ULONG_MAX);
         kfree(region);
 
