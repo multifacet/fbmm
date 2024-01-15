@@ -192,7 +192,6 @@ static long contigmmfs_fallocate(struct file *file, int mode, loff_t offset, lof
     struct contigmmfs_inode_info *inode_info = CMMFS_I(inode);
     struct contigmmfs_contig_alloc *region = NULL;
     struct contigmmfs_contig_alloc *next_region = NULL;
-    struct range_tlb_entry *tlb_entry;
     u64 start_addr = inode_info->va_start + offset;
     u64 end_addr = start_addr + len;
 
