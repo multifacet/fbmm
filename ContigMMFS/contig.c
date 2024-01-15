@@ -170,7 +170,7 @@ static int contigmmfs_mmap(struct file *file, struct vm_area_struct *vma)
 
     file_accessed(file);
     vma->vm_ops = &contigmmfs_vm_ops;
-    vma->vm_flags |= VM_MIXEDMAP;
+    vma->vm_flags |= VM_MIXEDMAP | VM_DONTEXPAND;
 
     return 0;
 err:
