@@ -101,6 +101,8 @@ static int contigmmfs_mmap(struct file *file, struct vm_area_struct *vma)
     u64 pages_to_alloc = (vma->vm_end - vma->vm_start) >> PAGE_SHIFT;
     u64 current_va = vma->vm_start;
 
+    inode_info->va_start = vma->vm_start - (vma->vm_pgoff << PAGE_SHIFT);
+
     while(pages_to_alloc > 0) {
         u64 folio_size;
 
@@ -149,6 +151,7 @@ static int contigmmfs_mmap(struct file *file, struct vm_area_struct *vma)
 
         // If badger trap is being used, add the ranges to the mm's list
         if (vma->vm_mm && vma->vm_mm->badger_trap_en && folio_size >= 8) {
+            inode_info->mm = vma->vm_mm;
             tlb_entry = kzalloc(sizeof(struct range_tlb_entry), GFP_KERNEL);
             // I'm being lazy here without the error checking, but it's
             // *probably* fine
@@ -184,6 +187,57 @@ err:
 
 static long contigmmfs_fallocate(struct file *file, int mode, loff_t offset, loff_t len)
 {
+    struct inode *inode = file->f_inode;
+    struct contigmmfs_sb_info *sbi = CMMFS_SB(inode->i_sb);
+    struct contigmmfs_inode_info *inode_info = CMMFS_I(inode);
+    struct contigmmfs_contig_alloc *region = NULL;
+    struct contigmmfs_contig_alloc *next_region = NULL;
+    struct range_tlb_entry *tlb_entry;
+    u64 start_addr = inode_info->va_start + offset;
+    u64 end_addr = start_addr + len;
+
+    if (!(mode & FALLOC_FL_PUNCH_HOLE))
+        return 0;
+
+    // Get the region with the lowest va_start that overlaps with the unmap region
+    region = mt_prev(&inode_info->mt, start_addr + 1, 0);
+    if (!region || region->va_end <= start_addr) {
+        // Ok, the start of the munmap range isn't mapped, but maybe the end is?
+        region = mt_next(&inode_info->mt, start_addr, ULONG_MAX);
+        if (!region || region->va_start >= end_addr)
+            return 0;
+        start_addr = region->va_start;
+    }
+
+    // Free each region in the range
+    while (region && start_addr < end_addr) {
+        // I don't know what to do if the unmap range straddles a folio region,
+        // so just punt on that for now
+        if (region->va_start < start_addr || region->va_end > end_addr)
+            break;
+
+        mtree_erase(&inode_info->mt, region->va_start);
+        sbi->num_pages -= folio_nr_pages(region->folio);
+        folio_put(region->folio);
+
+        // Clear the range tlb as necessary
+        if (inode_info->mm && inode_info->mm->badger_trap_en && folio_nr_pages(region->folio) >= 8) {
+            spin_lock(&inode_info->mm->range_tlb_lock);
+            tlb_entry = mtree_erase(&inode_info->mm->all_ranges, region->va_start);
+            spin_unlock(&inode_info->mm->range_tlb_lock);
+
+            if (tlb_entry)
+                kfree(tlb_entry);
+        }
+
+        next_region = mt_next(&inode_info->mt, region->va_start, ULONG_MAX);
+        kfree(region);
+
+        region = next_region;
+        if (region)
+            start_addr = region->va_start;
+    }
+
     return 0;
 }
 
@@ -223,6 +277,8 @@ struct inode *contigmmfs_get_inode(struct super_block *sb,
         return NULL;
     }
     mt_init(&info->mt);
+    info->va_start = 0;
+    info->mm = NULL;
 
     inode->i_ino = get_next_ino();
     inode_init_owner(&init_user_ns, inode, dir, mode);

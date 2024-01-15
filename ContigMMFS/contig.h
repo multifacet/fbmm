@@ -22,5 +22,7 @@ struct contigmmfs_contig_alloc {
 
 struct contigmmfs_inode_info {
     struct maple_tree mt;
+    u64 va_start;
+    struct mm_struct *mm;
 };
 #endif //CONTIG_MMFS_H
