@@ -60,10 +60,12 @@ static vm_fault_t bwmmfs_fault(struct vm_fault *vmf)
 {
     struct vm_area_struct *vma = vmf->vma;
     struct inode *inode = vma->vm_file->f_inode;
+    struct address_space *mapping = vma->vm_file->f_mapping;
     struct bwmmfs_inode_info * inode_info;
     struct bwmmfs_sb_info *sbi;
     struct page *page;
     loff_t offset = vmf->address - vma->vm_start + (vma->vm_pgoff << PAGE_SHIFT);
+    loff_t pgoff = offset >> PAGE_SHIFT;
     pte_t entry;
 
     inode_info = BWMMFS_I(inode);
@@ -90,6 +92,8 @@ static vm_fault_t bwmmfs_fault(struct vm_fault *vmf)
             return VM_FAULT_OOM;
         }
         sbi->num_pages++;
+        INIT_LIST_HEAD(&page->lru);
+        __filemap_add_folio(mapping, page_folio(page), pgoff, GFP_KERNEL, NULL);
 
         mtree_store(&inode_info->mt, offset, page, GFP_KERNEL);
     }

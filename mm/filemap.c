@@ -923,6 +923,7 @@ error:
 	folio_put_refs(folio, nr);
 	return xas_error(&xas);
 }
+EXPORT_SYMBOL_GPL(__filemap_add_folio);
 ALLOW_ERROR_INJECTION(__filemap_add_folio, ERRNO);
 
 int filemap_add_folio(struct address_space *mapping, struct folio *folio,
