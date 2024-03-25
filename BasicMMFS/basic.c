@@ -11,6 +11,7 @@
 #include <linux/string.h>
 #include <linux/falloc.h>
 #include <linux/pagewalk.h>
+#include <linux/file_based_mm.h>
 
 #include "basic.h"
 
@@ -49,7 +50,6 @@ struct page *basicmmfs_alloc_page(struct basicmmfs_inode_info *inode_info, struc
     page = list_first_entry(&sbi->free_list, struct page, lru);
     list_del(&page->lru);
     sbi->free_pages--;
-    get_page(page);
 
     // Clear the page outside of the critical section
     spin_unlock(&sbi->lock);
@@ -91,7 +91,10 @@ int basicmmfs_free_pte(pte_t *pte, unsigned long addr, unsigned long next,
     struct page *page;
 
     // just the pte_none check is probably enough, but check pte_present to be safe
-    if (pte_none(*pte) && !pte_present(*pte)) {
+    if (!pte) {
+        goto end;
+    }
+    if (pte_none(*pte) || !pte_present(*pte)) {
         goto end;
     }
 
@@ -146,6 +149,7 @@ void basicmmfs_free_range(struct inode *inode, u64 offset, loff_t len)
 static vm_fault_t basicmmfs_fault(struct vm_fault *vmf)
 {
     struct vm_area_struct *vma = vmf->vma;
+    struct address_space *mapping = vma->vm_file->f_mapping;
     struct inode *inode = vma->vm_file->f_inode;
     struct basicmmfs_inode_info *inode_info;
     struct basicmmfs_sb_info *sbi;
@@ -182,6 +186,7 @@ static vm_fault_t basicmmfs_fault(struct vm_fault *vmf)
             ret = VM_FAULT_OOM;
             goto unlock;
         }
+        __filemap_add_folio(mapping, page_folio(page), pgoff, GFP_KERNEL, NULL);
     }
 
 
@@ -271,6 +276,7 @@ const struct inode_operations basicmmfs_file_inode_operations = {
 const struct address_space_operations basicmmfs_aops = {
     .direct_IO = noop_direct_IO,
     .dirty_folio = noop_dirty_folio,
+    .writepage = fbmm_writepage,
 };
 
 struct inode *basicmmfs_get_inode(struct super_block *sb,
@@ -412,11 +418,84 @@ static int basicmmfs_show_options(struct seq_file *m, struct dentry *root)
     return 0;
 }
 
+#define BASICMMFS_MAX_PAGEOUT 512
+static long basicmmfs_nr_cached_objects(struct super_block *sb, struct shrink_control *sc)
+{
+    struct basicmmfs_sb_info *sbi = BMMFS_SB(sb);
+    long nr = 0;
+
+    spin_lock(&sbi->lock);
+    if (sbi->free_pages > 0)
+        nr = sbi->free_pages;
+    else
+        nr = max(sbi->num_pages - sbi->free_pages, (u64)BASICMMFS_MAX_PAGEOUT);
+    spin_unlock(&sbi->lock);
+
+    return nr;
+}
+
+static long basicmmfs_free_cached_objects(struct super_block *sb, struct shrink_control *sc)
+{
+    LIST_HEAD(folio_list);
+    LIST_HEAD(fail_list);
+    struct basicmmfs_sb_info *sbi = BMMFS_SB(sb);
+    struct page *page;
+    u64 i, num_scanned;
+
+    if (sbi->free_pages > 0) {
+        spin_lock(&sbi->lock);
+        for (i = 0; i < sc->nr_to_scan && i < sbi->free_pages; i++) {
+            page = list_first_entry(&sbi->free_list, struct page, lru);
+            list_del(&page->lru);
+            put_page(page);
+        }
+
+        sbi->num_pages -= i;
+        sbi->free_pages -= i;
+        spin_unlock(&sbi->lock);
+    } else if (sbi->num_pages > 0) {
+        spin_lock(&sbi->lock);
+        for (i = 0; i < sc->nr_to_scan && sbi->num_pages > 0; i++) {
+            page = list_first_entry(&sbi->active_list, struct page, lru);
+            list_move(&page->lru, &folio_list);
+            sbi->num_pages--;
+        }
+        spin_unlock(&sbi->lock);
+
+        num_scanned = i;
+        for (i = 0; i < num_scanned && !list_empty(&folio_list); i++) {
+            page = list_first_entry(&folio_list, struct page, lru);
+            list_del(&page->lru);
+            if (!fbmm_swapout_folio(page_folio(page))) {
+                pr_err("swapout err\n");
+                list_add_tail(&page->lru, &fail_list);
+            } else {
+                put_page(page);
+            }
+        }
+
+        spin_lock(&sbi->lock);
+        while (!list_empty(&fail_list)) {
+            page = list_first_entry(&fail_list, struct page, lru);
+            list_del(&page->lru);
+            list_add_tail(&page->lru, &sbi->active_list);
+            sbi->num_pages++;
+        }
+        spin_unlock(&sbi->lock);
+
+    }
+
+    sc->nr_scanned = i;
+    return i;
+}
+
 static const struct super_operations basicmmfs_ops = {
     .statfs = basicmmfs_statfs,
     .free_inode = basicmmfs_free_inode,
     .drop_inode = generic_delete_inode,
     .show_options = basicmmfs_show_options,
+    .nr_cached_objects = basicmmfs_nr_cached_objects,
+    .free_cached_objects = basicmmfs_free_cached_objects,
 };
 
 static int basicmmfs_fill_super(struct super_block *sb, struct fs_context *fc)

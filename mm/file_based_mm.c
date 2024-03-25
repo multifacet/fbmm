@@ -12,6 +12,8 @@
 #include <linux/maple_tree.h>
 #include <linux/sched.h>
 #include <linux/kthread.h>
+#include <linux/pagemap.h>
+#include <linux/mm.h>
 
 enum file_based_mm_state {
 	FBMM_OFF = 0,
@@ -283,8 +285,52 @@ static void drop_fbmm_file(struct fbmm_file *file) {
 	kfree(file);
 }
 
+static pmdval_t fbmm_alloc_pmd(struct vm_fault *vmf) {
+	struct mm_struct *mm = vmf->vma->vm_mm;
+	unsigned long address = vmf->address;
+	pgd_t *pgd;
+	p4d_t *p4d;
+
+	pgd = pgd_offset(mm, address);
+	p4d = p4d_alloc(mm, pgd, address);
+	if (!p4d)
+		return VM_FAULT_OOM;
+
+	vmf->pud = pud_alloc(mm, p4d, address);
+	if (!vmf->pud)
+		return VM_FAULT_OOM;
+
+	vmf->pmd = pmd_alloc(mm, vmf->pud, address);
+	if (!vmf->pmd)
+		return VM_FAULT_OOM;
+
+	vmf->orig_pmd = pmdp_get_lockless(vmf->pmd);
+
+	return pmd_val(*vmf->pmd);
+}
+
 ///////////////////////////////////////////////////////////////////////////////
 // External API functions
+inline bool is_vm_fbmm_page(struct vm_area_struct *vma) {
+    return !!(vma->vm_flags & VM_FBMM);
+}
+
+int fbmm_fault(struct vm_area_struct *vma, unsigned long address, unsigned int flags) {
+	struct vm_fault vmf = {
+		.vma = vma,
+		.address = address & PAGE_MASK,
+		.real_address = address,
+		.flags = flags,
+		.pgoff = linear_page_index(vma, address),
+		.gfp_mask = mapping_gfp_mask(vma->vm_file->f_mapping) | __GFP_FS | __GFP_IO,
+		//.gfp_mask = __get_fault_gfp_mask(vma),
+	};
+
+	if (fbmm_alloc_pmd(&vmf) == VM_FAULT_OOM)
+		return VM_FAULT_OOM;
+
+	return vma->vm_ops->fault(&vmf);
+}
 
 bool use_file_based_mm(pid_t pid) {
 	if (fbmm_state == FBMM_OFF) {
@@ -560,6 +606,9 @@ int fbmm_copy_mnt_dir(pid_t src, pid_t dst) {
 
 	return mtree_store(&fbmm_proc_mt, dst, new_proc, GFP_KERNEL);
 }
+
+///////////////////////////////////////////////////////////////////////////////
+// MFS Helper Functions
 
 ///////////////////////////////////////////////////////////////////////////////
 // sysfs files

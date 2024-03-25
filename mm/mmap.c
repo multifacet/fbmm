@@ -261,7 +261,7 @@ SYSCALL_DEFINE1(brk, unsigned long, brk)
 
 	/* Ok, looks good - let it rip. */
 	if (use_file_based_mm(current->tgid)) {
-		vm_flags_t vm_flags;
+		vm_flags_t vm_flags = VM_FBMM;
 		unsigned long prot = PROT_READ | PROT_WRITE;
 		unsigned long pgoff = 0;
 		struct file *f = fbmm_get_file(oldbrk, newbrk-oldbrk, prot, 0, false, &pgoff);
@@ -1347,6 +1347,8 @@ unsigned long do_mmap(struct file *file, unsigned long addr,
 	 */
 	vm_flags = calc_vm_prot_bits(prot, pkey) | calc_vm_flag_bits(flags) |
 			mm->def_flags | VM_MAYREAD | VM_MAYWRITE | VM_MAYEXEC;
+	if (created_fbmm_file)
+		vm_flags |= VM_FBMM;
 
 	if (flags & MAP_LOCKED)
 		if (!can_do_mlock())

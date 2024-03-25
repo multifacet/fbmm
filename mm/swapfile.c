@@ -1553,7 +1553,7 @@ unlock_out:
 	return ret;
 }
 
-static bool folio_swapped(struct folio *folio)
+bool folio_swapped(struct folio *folio)
 {
 	swp_entry_t entry = folio_swap_entry(folio);
 	struct swap_info_struct *si = _swap_info_get(entry);

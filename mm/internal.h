@@ -848,4 +848,17 @@ static inline bool vma_soft_dirty_enabled(struct vm_area_struct *vma)
 	return !(vma->vm_flags & VM_SOFTDIRTY);
 }
 
+/* possible outcome of pageout() */
+typedef enum {
+	/* failed to write folio out, folio is locked */
+	PAGE_KEEP,
+	/* move folio to the active list, folio is locked */
+	PAGE_ACTIVATE,
+	/* folio has been sent to the disk successfully, folio is unlocked */
+	PAGE_SUCCESS,
+	/* folio is clean and locked */
+	PAGE_CLEAN,
+} pageout_t;
+pageout_t pageout(struct folio *folio, struct address_space *mapping,
+			 struct swap_iocb **plug);
 #endif	/* __MM_INTERNAL_H */
