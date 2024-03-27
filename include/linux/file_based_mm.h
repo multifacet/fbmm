@@ -22,7 +22,7 @@ int fbmm_copy_mnt_dir(pid_t src, pid_t dst);
 // FBMM Helper functions for MFSs
 bool fbmm_swapout_folio(struct folio *folio);
 int fbmm_writepage(struct page *page, struct writeback_control *wbc);
-struct folio *fbmm_read_swap_entry(struct vm_fault *vmf, swp_entry_t entry, unsigned long pgoff);
+struct page *fbmm_read_swap_entry(struct vm_fault *vmf, swp_entry_t entry, unsigned long pgoff, struct page *page);
 
 #else //CONFIG_FILE_BASED_MM
 

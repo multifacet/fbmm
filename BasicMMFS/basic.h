@@ -12,6 +12,7 @@ struct basicmmfs_sb_info {
     struct list_head free_list;
     struct list_head active_list;
     u64 num_pages;
+    u64 max_pages;
     u64 free_pages;
 };
 

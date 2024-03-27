@@ -12,6 +12,8 @@
 #include <linux/falloc.h>
 #include <linux/pagewalk.h>
 #include <linux/file_based_mm.h>
+#include <linux/swap.h>
+#include <linux/swapops.h>
 
 #include "basic.h"
 
@@ -35,15 +37,26 @@ struct page *basicmmfs_alloc_page(struct basicmmfs_inode_info *inode_info, struc
         u64 page_offset)
 {
     u8 *kaddr;
+    u64 pages_added;
+    u64 alloc_size = 64;
     struct page *page = NULL;
 
     spin_lock(&sbi->lock);
 
     // First, do we have any free pages available?
     if (sbi->free_pages == 0) {
-        // TODO: when swapping is added, add a mechanism to get more pages if
-        // we have fewer total pages than the max allowed
-        goto unlock;
+        // Try to allocate more pages if we can
+        alloc_size = min(alloc_size, sbi->max_pages - sbi->num_pages);
+        if (alloc_size == 0)
+            goto unlock;
+
+        pages_added = alloc_pages_bulk_list(GFP_HIGHUSER, alloc_size, &sbi->free_list);
+
+        if (pages_added == 0)
+            goto unlock;
+
+        sbi->num_pages += pages_added;
+        sbi->free_pages += pages_added;
     }
 
     // Take a page from the free list
@@ -154,6 +167,8 @@ static vm_fault_t basicmmfs_fault(struct vm_fault *vmf)
     struct basicmmfs_inode_info *inode_info;
     struct basicmmfs_sb_info *sbi;
     struct page *page;
+    bool new_page = false;
+    bool swap_page = false;
     u64 pgoff = ((vmf->address - vma->vm_start) >> PAGE_SHIFT) + vma->vm_pgoff;
     vm_fault_t ret = 0;
     pte_t entry;
@@ -161,19 +176,17 @@ static vm_fault_t basicmmfs_fault(struct vm_fault *vmf)
     inode_info = BMMFS_I(inode);
     sbi = BMMFS_SB(inode->i_sb);
 
-    // For now, do nothing if the pte already exists.
-    // TODO: I'm not sure if this is right...
-    if (vmf->pte) {
-        vmf->page = page;
-        return 0;
+    if (!vmf->pte) {
+        if (pte_alloc(vma->vm_mm, vmf->pmd))
+            return VM_FAULT_OOM;
     }
 
-    if (pte_alloc(vma->vm_mm, vmf->pmd))
-        return VM_FAULT_OOM;
-
-    vmf->pte = pte_offset_map_lock(vma->vm_mm, vmf->pmd, vmf->address, &vmf->ptl);
-    if (!pte_none(*vmf->pte)) {
-        goto unlock;
+    vmf->pte = pte_offset_map(vmf->pmd, vmf->address);
+    vmf->orig_pte = *vmf->pte;
+    if (!pte_none(vmf->orig_pte) && pte_present(vmf->orig_pte)) {
+        // It looks like the PTE is already populated, so just return
+        ret = VM_FAULT_NOPAGE;
+        goto unmap;
     }
 
     // Get the page if it already allocated
@@ -182,13 +195,45 @@ static vm_fault_t basicmmfs_fault(struct vm_fault *vmf)
     // Try to allocate the page if it hasn't been already (e.g. from fallocate)
     if (!page) {
         page = basicmmfs_alloc_page(inode_info, sbi, pgoff);
+        new_page = true;
         if (!page) {
             ret = VM_FAULT_OOM;
-            goto unlock;
+            goto unmap;
         }
-        __filemap_add_folio(mapping, page_folio(page), pgoff, GFP_KERNEL, NULL);
     }
 
+    if (!pte_none(vmf->orig_pte) && !pte_present(vmf->orig_pte)) {
+        // Swapped out page
+        struct page *ret_page;
+        swp_entry_t swp_entry = pte_to_swp_entry(vmf->orig_pte);
+        swap_page = true;
+
+        ret_page = fbmm_read_swap_entry(vmf, swp_entry, pgoff, page);
+        if (page != ret_page) {
+            // A physical page was already being used for this virt page
+            // or there was an error, so we can return the page we allocated.
+            basicmmfs_return_page(page, sbi);
+            page = ret_page;
+            new_page = false;
+        }
+        if (!page) {
+            pr_err("Error swapping in page! %lx\n", vmf->address);
+            goto unmap;
+        }
+    }
+
+    vmf->ptl = pte_lockptr(vma->vm_mm, vmf->pmd);
+    spin_lock(vmf->ptl);
+    // Check if some other thread faulted here
+    if (!pte_same(vmf->orig_pte, *vmf->pte)) {
+        if (new_page) {
+            basicmmfs_return_page(page, sbi);
+        }
+        goto unlock;
+    }
+
+    if (new_page || swap_page)
+        __filemap_add_folio(mapping, page_folio(page), pgoff, GFP_KERNEL, NULL);
 
     // Construct the pte entry
     entry = mk_pte(page, vma->vm_page_prot);
@@ -208,7 +253,9 @@ static vm_fault_t basicmmfs_fault(struct vm_fault *vmf)
     ret = VM_FAULT_NOPAGE;
 
 unlock:
-    pte_unmap_unlock(vmf->pte, vmf->ptl);
+    spin_unlock(vmf->ptl);
+unmap:
+    pte_unmap(vmf->pte);
     return ret;
 }
 
@@ -520,6 +567,7 @@ static int basicmmfs_fill_super(struct super_block *sb, struct fs_context *fc)
     spin_lock_init(&sbi->lock);
     INIT_LIST_HEAD(&sbi->free_list);
     INIT_LIST_HEAD(&sbi->active_list);
+    sbi->max_pages = nr_pages;
     sbi->num_pages = 0;
     // TODO: Get the number of pages to request from a mount arg
     // Might need to be GFP_HIGHUSER?

@@ -245,41 +245,39 @@ int fbmm_writepage(struct page *page, struct writeback_control *wbc)
 }
 EXPORT_SYMBOL(fbmm_writepage);
 
-struct folio *fbmm_read_swap_entry(struct vm_fault *vmf, swp_entry_t entry, unsigned long pgoff)
+struct page *fbmm_read_swap_entry(struct vm_fault *vmf, swp_entry_t entry, unsigned long pgoff, struct page *page)
 {
 	struct vm_area_struct *vma = vmf->vma;
 	struct address_space *mapping = vma->vm_file->f_mapping;
-    struct swap_info_struct *si;
+	struct swap_info_struct *si;
 	struct folio *folio;
-    struct page *page;
 
-	if (unlikely(non_swap_entry(entry)))
+	if (unlikely(non_swap_entry(entry))) {
 		return NULL;
+	}
 
 	// If a folio is already mapped here, just return that.
 	// Another process has probably already brought in the shared page
 	folio = filemap_get_folio(mapping, pgoff);
-	if (folio)
-		return folio;
+	if (IS_ERR(folio)) {
+		return folio_page(folio, 0);
+	}
 
-    si = get_swap_device(entry);
-    if (!si)
-        return NULL;
+	si = get_swap_device(entry);
+	if (!si) {
+		return NULL;
+	}
 
-    // Do we need to zero if we're going to overwrite it anyway? I don't think so?
-    folio = folio_alloc(GFP_HIGHUSER, 0);
-    if (!folio)
-        return NULL;
-    page = &folio->page;
+	folio = page_folio(page);
 
-    folio_set_swap_entry(folio, entry);
-    swap_readpage(page, true, NULL);
-    folio->private = NULL;
+	folio_set_swap_entry(folio, entry);
+	swap_readpage(page, true, NULL);
+	folio->private = NULL;
 
-    __filemap_add_folio(mapping, folio, pgoff, GFP_KERNEL, NULL);
+	swap_free(entry);
 
-    swap_free(entry);
-
-	return folio;
+	count_vm_events(PSWPIN, thp_nr_pages(page));
+	dec_mm_counter(vma->vm_mm, MM_SWAPENTS);
+	return folio_page(folio, 0);
 }
 EXPORT_SYMBOL(fbmm_read_swap_entry);
