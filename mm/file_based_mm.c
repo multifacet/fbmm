@@ -292,12 +292,12 @@ void fbmm_populate_file(unsigned long start, unsigned long len)
 	proc = mtree_load(&fbmm_proc_mt, current->tgid);
 	// Create the proc data structure if it does not already exist
 	if (!proc) {
-		BUG();
+		return;
 	}
 
 	file = mt_prev(&proc->files_mt, start, 0);
 	if (!file || file->va_end <= start) {
-		BUG();
+		return;
 	}
 
 	offset = start - file->va_start;

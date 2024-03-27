@@ -29,6 +29,7 @@
 #include <linux/pgtable.h>
 #include <linux/kasan.h>
 #include <linux/memremap.h>
+#include <linux/file_based_mm.h>
 
 struct mempolicy;
 struct anon_vma;
@@ -2879,6 +2880,7 @@ extern int __mm_populate(unsigned long addr, unsigned long len,
 static inline void mm_populate(unsigned long addr, unsigned long len)
 {
 	/* Ignore errors */
+	fbmm_populate_file(addr, len);
 	(void) __mm_populate(addr, len, 1);
 }
 #else
