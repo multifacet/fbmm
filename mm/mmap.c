@@ -268,7 +268,7 @@ SYSCALL_DEFINE1(brk, unsigned long, brk)
 
 		if (f && !IS_ERR(f)) {
 			vm_flags = VM_DATA_DEFAULT_FLAGS | VM_ACCOUNT | mm->def_flags
-				| VM_SHARED | VM_MAYSHARE;
+				| VM_SHARED | VM_MAYSHARE | VM_FBMM;
 			mmap_region(f, oldbrk, newbrk-oldbrk, vm_flags, pgoff, NULL);
 			used_fbmm = true;
 		}
