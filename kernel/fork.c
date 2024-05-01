@@ -579,8 +579,8 @@ static void dup_mm_exe_file(struct mm_struct *mm, struct mm_struct *oldmm)
 }
 
 #ifdef CONFIG_MMU
-static __latent_entropy int dup_mmap(struct mm_struct *mm,
-					struct mm_struct *oldmm)
+static __latent_entropy int dup_mmap(struct task_struct *tsk,
+					struct mm_struct *mm, struct mm_struct *oldmm)
 {
 	struct vm_area_struct *mpnt, *tmp;
 	int retval;
@@ -662,7 +662,32 @@ static __latent_entropy int dup_mmap(struct mm_struct *mm,
 			goto fail_nomem_anon_vma_fork;
 		tmp->vm_flags &= ~(VM_LOCKED | VM_LOCKONFAULT);
 		file = tmp->vm_file;
-		if (file) {
+		if (file && use_file_based_mm(tsk) && (tmp->vm_flags & (VM_SHARED | VM_FBMM)) == VM_FBMM) {
+			// If this is a private FBMM file, we need to create a new file for this allocation
+			unsigned long len = tmp->vm_end - tmp->vm_start;
+			unsigned long prot;
+			unsigned long pgoff;
+			struct file *orig_file = file;
+
+			// PROT_READ/WRITE/EXEC have the same values as VM_READ/WRITE/EXEC
+			prot = tmp->vm_flags & (VM_READ | VM_WRITE | VM_EXEC);
+			// "true" for mmap may be incorrect, but if it's wrong, it'll only
+			// affect the next brk allocation
+			file = fbmm_get_file(tsk, tmp->vm_start, len, prot, 0, true, &pgoff);
+			if (!file) {
+				pr_err("Failed to create new file for fork. I don't know what to do here!\n");
+				BUG();
+			}
+
+			tmp->vm_pgoff = pgoff;
+			tmp->vm_file = get_file(file);
+			if (call_mmap(file, tmp)) {
+				pr_err("Error calling mmap for FBMM file during fork\n");
+			}
+
+			// Add the original file to the new proc's list of cow FBMM files
+			fbmm_add_cow_file(tsk, current, orig_file, tmp->vm_start);
+		} else if (file) {
 			struct address_space *mapping = file->f_mapping;
 
 			get_file(file);
@@ -691,8 +716,12 @@ static __latent_entropy int dup_mmap(struct mm_struct *mm,
 			goto fail_nomem_mas_store;
 
 		mm->map_count++;
-		if (!(tmp->vm_flags & VM_WIPEONFORK))
-			retval = copy_page_range(tmp, mpnt);
+		if (!(tmp->vm_flags & VM_WIPEONFORK)) {
+			if (file && file->f_inode->i_sb->s_op->copy_page_range)
+				retval = file->f_inode->i_sb->s_op->copy_page_range(tmp, mpnt);
+			else
+				retval = copy_page_range(tmp, mpnt);
+		}
 
 		if (tmp->vm_ops && tmp->vm_ops->open)
 			tmp->vm_ops->open(tmp);
@@ -1564,7 +1593,7 @@ static struct mm_struct *dup_mm(struct task_struct *tsk,
 	if (!mm_init(mm, tsk, mm->user_ns))
 		goto fail_nomem;
 
-	err = dup_mmap(mm, oldmm);
+	err = dup_mmap(tsk, mm, oldmm);
 	if (err)
 		goto free_pt;
 
@@ -2126,6 +2155,19 @@ static __latent_entropy struct task_struct *copy_process(
 		 */
 		p->flags |= PF_IO_WORKER;
 		siginitsetinv(&p->blocked, sigmask(SIGKILL)|sigmask(SIGSTOP));
+	}
+
+	// TODO pass clone flags to fbmm_copy and do this logic there
+	if (clone_flags & CLONE_THREAD) {
+		// If the new task is just a thread, not a new proc, just copy fbmm info
+		p->fbmm_proc = current->fbmm_proc;
+	} if (use_file_based_mm(current)) {
+		// Copy the default fbmm mount dir on fork
+		if (fbmm_copy(current, p)) {
+			pr_err("Failed to copy fbmm mnt dir from %d to %d\n", current->tgid, p->tgid);
+		}
+	} else {
+		p->fbmm_proc = NULL;
 	}
 
 	p->set_child_tid = (clone_flags & CLONE_CHILD_SETTID) ? args->child_tid : NULL;
@@ -2732,12 +2774,6 @@ pid_t kernel_clone(struct kernel_clone_args *args)
 	p->total_dtlb_misses = 0;
 	p->total_dtlb_4k_misses = 0;
 	p->total_dtlb_hugetlb_misses = 0;
-	// Copy the default fbmm mount dir on fork
-	if (use_file_based_mm(current->tgid)) {
-		if (fbmm_copy_mnt_dir(current->tgid, p->tgid)) {
-			pr_err("Failed to copy fbmm mnt dir from %d to %d\n", current->tgid, p->tgid);
-		}
-	}
 	wake_up_new_task(p);
 
 	/* forking complete and child started to run, tell ptracer */

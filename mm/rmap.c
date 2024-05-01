@@ -1456,6 +1456,7 @@ void page_remove_rmap(struct page *page,
 
 	munlock_vma_page(page, vma, compound);
 }
+EXPORT_SYMBOL_GPL(page_remove_rmap);
 
 /*
  * @arg: enum ttu_flags will be passed to this argument

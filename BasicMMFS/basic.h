@@ -22,6 +22,8 @@ struct basicmmfs_inode_info {
     struct maple_tree falloc_mt;
     // The first virtual address this file is associated with.
     u64 file_va_start;
+    // The file offset to folio mapping from the file
+    struct address_space *mapping;
 };
 
 #endif //BASIC_MMFS_H

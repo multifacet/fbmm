@@ -14,6 +14,9 @@
 #include <linux/file_based_mm.h>
 #include <linux/swap.h>
 #include <linux/swapops.h>
+#include <linux/pagevec.h>
+
+#include <asm/tlbflush.h>
 
 #include "basic.h"
 
@@ -127,36 +130,22 @@ void basicmmfs_free_range(struct inode *inode, u64 offset, loff_t len)
 {
     struct basicmmfs_sb_info *sbi = BMMFS_SB(inode->i_sb);
     struct basicmmfs_inode_info *inode_info = BMMFS_I(inode);
-    struct vm_area_struct *vma;
-    struct mm_walk_ops walk_ops = {
-        .pte_entry = basicmmfs_free_pte,
-    };
-    struct mm_struct *mm = current->mm;
-    u64 start_addr = inode_info->file_va_start + offset;
-    u64 end_addr = start_addr + len;
-    u64 cur_addr = start_addr;
-    u64 cur_end;
+    struct address_space *mapping = inode_info->mapping;
+    struct folio_batch fbatch;
+    int i;
+    pgoff_t cur_offset = offset;
+    pgoff_t end_offset = offset + len;
 
-	while (cur_addr < end_addr) {
-        vma = find_vma(mm, cur_addr);
-        if (!vma)
-            break;
+    folio_batch_init(&fbatch);
+    while (cur_offset < end_offset) {
+        filemap_get_folios(mapping, &cur_offset, end_offset, &fbatch);
 
-        // Make sure this VMA maps this file
-        if (!vma->vm_file || vma->vm_file->f_inode != inode) {
-            cur_addr = vma->vm_end;
-            continue;
+        for (i = 0; i < fbatch.nr; i++) {
+            basicmmfs_return_page(folio_page(fbatch.folios[i], 0), sbi);
         }
 
-        if (vma->vm_end < end_addr)
-            cur_end = vma->vm_end;
-        else
-            cur_end = end_addr;
-
-        walk_page_range(current->mm, cur_addr, cur_end, &walk_ops, sbi);
-
-        cur_addr = vma->vm_end;
-	}
+        folio_batch_release(&fbatch);
+    }
 }
 
 static vm_fault_t basicmmfs_fault(struct vm_fault *vmf)
@@ -166,9 +155,10 @@ static vm_fault_t basicmmfs_fault(struct vm_fault *vmf)
     struct inode *inode = vma->vm_file->f_inode;
     struct basicmmfs_inode_info *inode_info;
     struct basicmmfs_sb_info *sbi;
-    struct page *page;
+    struct page *page = NULL;
     bool new_page = false;
     bool swap_page = false;
+    bool cow_fault = false;
     u64 pgoff = ((vmf->address - vma->vm_start) >> PAGE_SHIFT) + vma->vm_pgoff;
     vm_fault_t ret = 0;
     pte_t entry;
@@ -184,9 +174,14 @@ static vm_fault_t basicmmfs_fault(struct vm_fault *vmf)
     vmf->pte = pte_offset_map(vmf->pmd, vmf->address);
     vmf->orig_pte = *vmf->pte;
     if (!pte_none(vmf->orig_pte) && pte_present(vmf->orig_pte)) {
-        // It looks like the PTE is already populated, so just return
-        ret = VM_FAULT_NOPAGE;
-        goto unmap;
+        if (!(vmf->flags & FAULT_FLAG_WRITE)) {
+            // It looks like the PTE is already populated,
+            // so maybe two threads raced to first fault.
+            ret = VM_FAULT_NOPAGE;
+            goto unmap;
+        }
+
+        cow_fault = true;
     }
 
     // Get the page if it already allocated
@@ -232,6 +227,42 @@ static vm_fault_t basicmmfs_fault(struct vm_fault *vmf)
         goto unlock;
     }
 
+    // Handle COW fault
+    if (cow_fault) {
+        u8 *src_kaddr, *dst_kaddr;
+        struct page *old_page;
+        unsigned long old_pfn;
+
+        old_pfn = pte_pfn(vmf->orig_pte);
+        old_page = pfn_to_page(old_pfn);
+
+        lock_page(old_page);
+
+        // If there's more than one reference to this page, we need to copy it.
+        // Otherwise, we can just reuse it
+        if (page_mapcount(old_page) > 1) {
+            // Actually copy the page
+            src_kaddr = kmap(old_page);
+            dst_kaddr = kmap(page);
+            memcpy(dst_kaddr, src_kaddr, PAGE_SIZE);
+            kunmap(page);
+            kunmap(old_page);
+
+            // The old page is unmapped, so we can drop the reference
+            page_remove_rmap(old_page, vma, false);
+        } else {
+            basicmmfs_return_page(page, sbi);
+            page = old_page;
+        }
+        // Drop a reference to old_page even if we are going to keep it
+        // because the reference will be increased at the end of the fault
+        put_page(old_page);
+        // Decrease the filepage count for the same reason
+        percpu_counter_dec(&vma->vm_mm->rss_stat[MM_FILEPAGES]);
+
+        unlock_page(old_page);
+    }
+
     if (new_page || swap_page)
         __filemap_add_folio(mapping, page_folio(page), pgoff, GFP_KERNEL, NULL);
 
@@ -250,6 +281,7 @@ static vm_fault_t basicmmfs_fault(struct vm_fault *vmf)
     update_mmu_cache(vma, vmf->address, vmf->pte);
     vmf->page = page;
     get_page(page);
+    flush_tlb_page(vma, vmf->address);
     ret = VM_FAULT_NOPAGE;
 
 unlock:
@@ -273,6 +305,7 @@ static int basicmmfs_mmap(struct file *file, struct vm_area_struct *vma)
     vma->vm_ops = &basicmmfs_vm_ops;
 
     inode_info->file_va_start = vma->vm_start - (vma->vm_pgoff << PAGE_SHIFT);
+    inode_info->mapping = file->f_mapping;
 
     return 0;
 }
@@ -543,6 +576,7 @@ static const struct super_operations basicmmfs_ops = {
     .show_options = basicmmfs_show_options,
     .nr_cached_objects = basicmmfs_nr_cached_objects,
     .free_cached_objects = basicmmfs_free_cached_objects,
+    .copy_page_range = fbmm_copy_page_range,
 };
 
 static int basicmmfs_fill_super(struct super_block *sb, struct fs_context *fc)

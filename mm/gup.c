@@ -1517,7 +1517,7 @@ long populate_vma_page_range(struct vm_area_struct *vma,
 	if ((vma->vm_flags & (VM_WRITE | VM_SHARED)) == VM_WRITE)
 		gup_flags |= FOLL_WRITE;
     /* We DO want to dirty writeable pages if they aare for FOM though */
-	else if ((vma->vm_flags & VM_WRITE) && use_file_based_mm(current->tgid)) {
+	else if ((vma->vm_flags & VM_WRITE) && use_file_based_mm(current)) {
 		gup_flags |= FOLL_WRITE;
 	}
 

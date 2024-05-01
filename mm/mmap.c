@@ -260,11 +260,11 @@ SYSCALL_DEFINE1(brk, unsigned long, brk)
 		goto out;
 
 	/* Ok, looks good - let it rip. */
-	if (use_file_based_mm(current->tgid)) {
+	if (use_file_based_mm(current)) {
 		vm_flags_t vm_flags = VM_FBMM;
 		unsigned long prot = PROT_READ | PROT_WRITE;
 		unsigned long pgoff = 0;
-		struct file *f = fbmm_get_file(oldbrk, newbrk-oldbrk, prot, 0, false, &pgoff);
+		struct file *f = fbmm_get_file(current, oldbrk, newbrk-oldbrk, prot, 0, false, &pgoff);
 
 		if (f && !IS_ERR(f)) {
 			vm_flags = VM_DATA_DEFAULT_FLAGS | VM_ACCOUNT | mm->def_flags
@@ -1299,22 +1299,15 @@ unsigned long do_mmap(struct file *file, unsigned long addr,
 		return -ENOMEM;
 
 	// See if we want to use file only memory
-	if (!file && (flags & MAP_ANONYMOUS) && use_file_based_mm(current->tgid)) {
+	if (!file && (flags & MAP_ANONYMOUS) && use_file_based_mm(current)) {
 		addr = fbmm_get_unmapped_area(addr, len, pgoff, flags);
 
 		if (!IS_ERR_VALUE(addr)) {
-			file = fbmm_get_file(addr, len, prot, flags, true, &pgoff);
+			file = fbmm_get_file(current, addr, len, prot, flags, true, &pgoff);
 
 			if (file && !IS_ERR(file)) {
 				created_fbmm_file = true;
 				flags = flags & ~MAP_ANONYMOUS;
-
-				// If the caller used MAP_PRIVATE, switch it to MAP_SHARED so that
-				// the system doesn't save the writes to anonymous memory
-				if (flags & MAP_PRIVATE) {
-					flags = flags & ~MAP_PRIVATE;
-					flags = flags | MAP_SHARED;
-				}
 			} else {
 				pr_err("Failed to create fbmm file: %ld %px\n", (long)file, file);
 				file = NULL;
@@ -2544,7 +2537,7 @@ int do_mas_munmap(struct ma_state *mas, struct mm_struct *mm,
 	if (!vma)
 		return 0;
 
-	fbmm_munmap(current->tgid, start, end - start);
+	fbmm_munmap(current, start, end - start);
 	return do_mas_align_munmap(mas, vma, mm, start, end, uf, downgrade);
 }
 

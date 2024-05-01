@@ -9,10 +9,16 @@
 #include <linux/frontswap.h>
 #include <linux/mmu_notifier.h>
 #include <linux/swap_slots.h>
+#include <linux/pagewalk.h>
+
+#include <asm/tlbflush.h>
 
 #include "internal.h"
 #include "swap.h"
 
+///////////////////////////////////////////////////////////////////////////////
+// Swap Helpers
+///////////////////////////////////////////////////////////////////////////////
 static bool fbmm_try_to_unmap_one(struct folio *folio, struct vm_area_struct *vma,
 				unsigned long address, void *arg)
 {
@@ -281,3 +287,124 @@ struct page *fbmm_read_swap_entry(struct vm_fault *vmf, swp_entry_t entry, unsig
 	return folio_page(folio, 0);
 }
 EXPORT_SYMBOL(fbmm_read_swap_entry);
+
+///////////////////////////////////////////////////////////////////////////////
+// Copy on write helpers
+///////////////////////////////////////////////////////////////////////////////
+struct page_walk_levels {
+	struct vm_area_struct *vma;
+	pgd_t *pgd;
+	p4d_t *p4d;
+	pud_t *pud;
+	pmd_t *pmd;
+	pte_t *pte;
+};
+
+int fbmm_copy_pgd(pgd_t *pgd, unsigned long addr, unsigned long next,
+		struct mm_walk *walk) {
+	struct page_walk_levels *dst_levels = walk->private;
+
+	dst_levels->pgd = pgd_offset(dst_levels->vma->vm_mm, addr);
+	return 0;
+}
+
+int fbmm_copy_p4d(p4d_t *p4d, unsigned long addr, unsigned long next,
+		struct mm_walk *walk) {
+	struct page_walk_levels *dst_levels = walk->private;
+
+	dst_levels->p4d = p4d_alloc(dst_levels->vma->vm_mm, dst_levels->pgd, addr);
+	if (!dst_levels->p4d)
+		return -ENOMEM;
+	return 0;
+}
+
+int fbmm_copy_pud(pud_t *pud, unsigned long addr, unsigned long next,
+		struct mm_walk *walk) {
+	struct page_walk_levels *dst_levels = walk->private;
+
+	dst_levels->pud = pud_alloc(dst_levels->vma->vm_mm, dst_levels->p4d, addr);
+	if (!dst_levels->pud)
+		return -ENOMEM;
+	return 0;
+}
+
+int fbmm_copy_pmd(pmd_t *pmd, unsigned long addr, unsigned long next,
+		struct mm_walk *walk) {
+	struct page_walk_levels *dst_levels = walk->private;
+
+	dst_levels->pmd = pmd_alloc(dst_levels->vma->vm_mm, dst_levels->pud, addr);
+	if (!dst_levels->pmd)
+		return -ENOMEM;
+	return 0;
+}
+
+int fbmm_copy_pte(pte_t *pte, unsigned long addr, unsigned long next,
+		struct mm_walk *walk) {
+	struct page_walk_levels *dst_levels = walk->private;
+	struct mm_struct *dst_mm = dst_levels->vma->vm_mm;
+	struct mm_struct *src_mm = walk->mm;
+	pte_t *src_pte = pte;
+	pte_t *dst_pte;
+	spinlock_t *dst_ptl;
+	pte_t entry;
+	struct page *page;
+	struct folio *folio;
+	int ret = 0;
+
+	dst_pte = pte_alloc_map(dst_mm, dst_levels->pmd, addr);
+	if (!dst_pte) {
+		return -ENOMEM;
+	}
+	dst_ptl = pte_lockptr(dst_mm, dst_levels->pmd);
+	// The spinlock for the src pte should already be taken
+	spin_lock_nested(dst_ptl, SINGLE_DEPTH_NESTING);
+
+	if (pte_none(*src_pte))
+		goto unlock;
+
+	// I don't really want to handle to swap case, so I won't for now
+	if (unlikely(!pte_present(*src_pte))) {
+		pr_alert("Can't copy swapped out FBMM page on fork!\n");
+		ret = -EIO;
+		goto unlock;
+	}
+
+	// Figure out what the page we care about is
+	entry = ptep_get(src_pte);
+	page = vm_normal_page(walk->vma, addr, entry);
+	if (page)
+		folio = page_folio(page);
+
+	folio_get(folio);
+	page_dup_file_rmap(page, false);
+    percpu_counter_inc(&dst_mm->rss_stat[MM_FILEPAGES]);
+
+	if (!(walk->vma->vm_flags & VM_SHARED) && pte_write(entry)) {
+		ptep_set_wrprotect(src_mm, addr, src_pte);
+		entry = pte_wrprotect(entry);
+	}
+
+	entry = pte_mkold(entry);
+	set_pte_at(dst_mm, addr, dst_pte, entry);
+
+unlock:
+	pte_unmap_unlock(dst_pte, dst_ptl);
+	return ret;
+}
+
+int fbmm_copy_page_range(struct vm_area_struct *dst, struct vm_area_struct *src) {
+	struct page_walk_levels dst_levels;
+	struct mm_walk_ops walk_ops = {
+		.pgd_entry = fbmm_copy_pgd,
+		.p4d_entry = fbmm_copy_p4d,
+		.pud_entry = fbmm_copy_pud,
+		.pmd_entry = fbmm_copy_pmd,
+		.pte_entry = fbmm_copy_pte,
+	};
+
+	dst_levels.vma = dst;
+
+	return walk_page_range(src->vm_mm, src->vm_start, src->vm_end,
+		&walk_ops, &dst_levels);
+}
+EXPORT_SYMBOL(fbmm_copy_page_range);

@@ -31,25 +31,15 @@ struct fbmm_file {
 	unsigned long va_start;
 	// The ending virtual address assigned to this file (exclusive)
 	unsigned long va_end;
-};
-
-struct fbmm_proc {
-	pid_t pid;
-	char *mnt_dir_str;
-	struct path mnt_dir_path;
-	// This file exists just to be passed to get_unmapped_area in mmap
-	struct file *get_unmapped_area_file;
-	struct maple_tree files_mt;
-	bool in_work_queue;
 	atomic_t refcount;
 };
 
+struct fbmm_cow_list_entry {
+	struct list_head node;
+	struct fbmm_file *file;
+};
 
 static enum file_based_mm_state fbmm_state = FBMM_OFF;
-static DECLARE_RWSEM(fbmm_procs_sem);
-// This is used to store the default fbmm mount directories for each proc.
-// An entry for a pid exists in this tree iff the process of that pid is using FBMM.
-static struct maple_tree fbmm_proc_mt = MTREE_INIT(fbmm_proc_mt, 0);
 
 static DEFINE_SPINLOCK(stats_lock);
 static u64 file_create_time = 0;
@@ -64,7 +54,7 @@ static int fbmm_prealloc_map_populate = 1;
 ///////////////////////////////////////////////////////////////////////////////
 // struct fbmm_proc functions
 
-static struct fbmm_proc *fbmm_create_new_proc(char *mnt_dir_str, pid_t pid) {
+static struct fbmm_proc *fbmm_create_new_proc(char *mnt_dir_str) {
 	const int OPEN_FLAGS = O_EXCL | O_TMPFILE | O_RDWR;
 	const umode_t OPEN_MODE = S_IFREG | S_IRUSR | S_IWUSR;
 	struct fbmm_proc *proc;
@@ -81,10 +71,9 @@ static struct fbmm_proc *fbmm_create_new_proc(char *mnt_dir_str, pid_t pid) {
 	if (IS_ERR(proc->get_unmapped_area_file)) {
 		pr_err("fbmm_create_new_proc: Could not create the get_unmapped_area_file\n");
 	}
-	proc->pid = pid;
 	mt_init(&proc->files_mt);
-	proc->in_work_queue = false;
 	atomic_set(&proc->refcount, 1);
+	INIT_LIST_HEAD(&proc->cow_files);
 
 	return proc;
 }
@@ -103,9 +92,19 @@ static void fbmm_put_proc(struct fbmm_proc *proc) {
 // Helper functions
 
 static void drop_fbmm_file(struct fbmm_file *file) {
-	filp_close(file->f, current->files);
-	fput(file->f);
-	kfree(file);
+	// Only free if this is the last proc dropping the file
+	if (atomic_dec_return(&file->refcount) == 0) {
+		vfs_fallocate(file->f,
+				FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE,
+				0, FBMM_DEFAULT_FILE_SIZE);
+		filp_close(file->f, current->files);
+		fput(file->f);
+		kfree(file);
+	}
+}
+
+static void get_fbmm_file(struct fbmm_file *file) {
+	atomic_inc(&file->refcount);
 }
 
 static pmdval_t fbmm_alloc_pmd(struct vm_fault *vmf) {
@@ -155,11 +154,15 @@ int fbmm_fault(struct vm_area_struct *vma, unsigned long address, unsigned int f
 	return vma->vm_ops->fault(&vmf);
 }
 
-bool use_file_based_mm(pid_t pid) {
+bool fbmm_enabled() {
+	return fbmm_state != FBMM_OFF;
+}
+
+bool use_file_based_mm(struct task_struct *tsk) {
 	if (fbmm_state == FBMM_OFF) {
 		return false;
 	} if (fbmm_state == FBMM_SELECTED_PROCS) {
-		return mtree_load(&fbmm_proc_mt, pid) != NULL;
+		return tsk->fbmm_proc != NULL;
 	} else if (fbmm_state == FBMM_ALL) {
 		return true;
 	}
@@ -173,7 +176,7 @@ unsigned long fbmm_get_unmapped_area(unsigned long addr, unsigned long len,
 {
 	struct fbmm_proc *proc;
 
-	proc = mtree_load(&fbmm_proc_mt, current->tgid);
+	proc = current->fbmm_proc;
 	if (!proc) {
 		return -EINVAL;
 	}
@@ -181,7 +184,7 @@ unsigned long fbmm_get_unmapped_area(unsigned long addr, unsigned long len,
 	return get_unmapped_area(proc->get_unmapped_area_file, addr, len, pgoff, flags);
 }
 
-struct file *fbmm_get_file(unsigned long addr, unsigned long len,
+struct file *fbmm_get_file(struct task_struct *tsk, unsigned long addr, unsigned long len,
 		unsigned long prot, int flags, bool mmap, unsigned long *pgoff) {
 	struct file *f;
 	struct fbmm_file *fbmm_file;
@@ -194,7 +197,7 @@ struct file *fbmm_get_file(unsigned long addr, unsigned long len,
 	u64 start_time = rdtsc();
 	u64 end_time;
 
-	proc = mtree_load(&fbmm_proc_mt, current->tgid);
+	proc = tsk->fbmm_proc;
 	if (!proc) {
 		return NULL;
 	}
@@ -255,6 +258,7 @@ struct file *fbmm_get_file(unsigned long addr, unsigned long len,
 		return NULL;
 	}
 	fbmm_file->f = f;
+	atomic_set(&fbmm_file->refcount, 1);
 	if (mmap) {
 		// Since VAs in the mmap region typically grow down,
 		// this mapping will be the "end" of the file
@@ -289,7 +293,7 @@ void fbmm_populate_file(unsigned long start, unsigned long len)
 	u64 start_time = rdtsc();
 	u64 end_time;
 
-	proc = mtree_load(&fbmm_proc_mt, current->tgid);
+	proc = current->fbmm_proc;
 	// Create the proc data structure if it does not already exist
 	if (!proc) {
 		return;
@@ -312,7 +316,7 @@ void fbmm_populate_file(unsigned long start, unsigned long len)
 	return;
 }
 
-int fbmm_munmap(pid_t pid, unsigned long start, unsigned long len) {
+int fbmm_munmap(struct task_struct *tsk, unsigned long start, unsigned long len) {
 	struct fbmm_proc *proc = NULL;
 	struct fbmm_file *fbmm_file = NULL;
 	struct fbmm_file *prev_file = NULL;
@@ -322,8 +326,7 @@ int fbmm_munmap(pid_t pid, unsigned long start, unsigned long len) {
 	u64 start_time = rdtsc();
 	u64 end_time;
 
-	proc = mtree_load(&fbmm_proc_mt, pid);
-
+	proc = tsk->fbmm_proc;
 	if (!proc)
 		return 0;
 
@@ -362,9 +365,18 @@ int fbmm_munmap(pid_t pid, unsigned long start, unsigned long len) {
 		BUG_ON(falloc_start_offset > falloc_end_offset);
 		falloc_len = falloc_end_offset - falloc_start_offset;
 
-		ret = vfs_fallocate(fbmm_file->f,
-				FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE,
-				falloc_start_offset, falloc_len);
+		/* 
+		 * Because shared mappings via fork are hard, only fallocate
+		 * if there is only one proc using this file.
+		 * It would be nice to be able to free the memory if all procs sharing
+		 * the file have unmapped it, but that would require tracking usage
+		 * at a page granularity.
+		 */
+		if (atomic_read(&fbmm_file->refcount) == 1) {
+			ret = vfs_fallocate(fbmm_file->f,
+					FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE,
+					falloc_start_offset, falloc_len);
+		}
 
 		fbmm_file = mt_next(&proc->files_mt, fbmm_file->va_start, ULONG_MAX);
 		if (!fbmm_file || fbmm_file->va_end <= start)
@@ -381,55 +393,119 @@ exit:
 	return ret;
 }
 
-void fbmm_check_exiting_proc(pid_t pid) {
+void fbmm_exit(struct task_struct *tsk) {
 	struct fbmm_proc *proc;
 	struct fbmm_file *file;
+	struct fbmm_cow_list_entry *cow_entry, *tmp;
 	unsigned long index = 0;
 
-	proc = mtree_erase(&fbmm_proc_mt, pid);
-
+	proc = tsk->fbmm_proc;
 	if (!proc)
 		return;
 
 	mt_for_each(&proc->files_mt, file, index, ULONG_MAX) {
-		vfs_fallocate(file->f,
-				FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE,
-				0, FBMM_DEFAULT_FILE_SIZE);
 		drop_fbmm_file(file);
 	}
 	mtree_destroy(&proc->files_mt);
 
+	list_for_each_entry_safe(cow_entry, tmp, &proc->cow_files, node) {
+		list_del(&cow_entry->node);
+
+		drop_fbmm_file(cow_entry->file);
+		kfree(cow_entry);
+	}
+
 	fbmm_put_proc(proc);
 }
 
-// Make the default mmfs dir of the dst the same as src
-int fbmm_copy_mnt_dir(pid_t src, pid_t dst) {
+int fbmm_copy(struct task_struct *src_tsk, struct task_struct *dst_tsk) {
 	struct fbmm_proc *proc;
-	struct fbmm_proc *new_proc;
+	struct fbmm_cow_list_entry *src_cow, *dst_cow;
 	char *buffer;
 	char *src_dir;
 	size_t len;
 
-	// noop
-	if (src == dst)
-		return 0;
-
 	// Does the src actually have a default mnt dir
-	proc = mtree_load(&fbmm_proc_mt, src);
+	proc = src_tsk->fbmm_proc;
 	if (!proc)
 		return -1;
 
+	// Make a new fbmm_proc with the same mnt dir
 	src_dir = proc->mnt_dir_str;
 
 	len = strnlen(src_dir, PATH_MAX);
 	buffer = kmalloc(PATH_MAX + 1, GFP_KERNEL);
 	strncpy(buffer, src_dir, len + 1);
 
-	new_proc = fbmm_create_new_proc(buffer, dst);
+	dst_tsk->fbmm_proc = fbmm_create_new_proc(buffer);
+    if (!dst_tsk->fbmm_proc) {
+        return -1;
+    }
 
-	return mtree_store(&fbmm_proc_mt, dst, new_proc, GFP_KERNEL);
+	// If the source has CoW files, they may also be CoW files in the destination
+	// so we need to copy that too.
+	list_for_each_entry(src_cow, &proc->cow_files, node) {
+		dst_cow = kmalloc(sizeof(struct fbmm_cow_list_entry), GFP_KERNEL);
+		if (!dst_cow) {
+			pr_err("fbmm_copy: Could not allocate dst_cow!\n");
+			return -1;
+		}
+
+		get_fbmm_file(src_cow->file);
+		dst_cow->file = src_cow->file;
+
+		list_add(&dst_cow->node, &dst_tsk->fbmm_proc->cow_files);
+	}
+
+	return 0;
 }
 
+/*
+ * fbmm_add_cow_file() - 
+ */
+void fbmm_add_cow_file(struct task_struct *new_tsk, struct task_struct *old_tsk,
+		struct file *file, unsigned long start)
+{
+	struct fbmm_proc *new_proc;
+	struct fbmm_proc *old_proc;
+	struct fbmm_file *fbmm_file;
+	struct fbmm_cow_list_entry *cow_entry;
+	unsigned long search_start = start + 1;
+
+	new_proc = new_tsk->fbmm_proc;
+	old_proc = old_tsk->fbmm_proc;
+	if (!new_proc) {
+		pr_err("fbmm_add_cow_file: new_proc not valid!\n");
+		return;
+	}
+	if (!old_proc) {
+		pr_err("fbmm_add_cow_file: old_proc not valid!\n");
+		return;
+	}
+
+	// Find the fbmm_file that corresponds with the struct file
+	// fbmm files can overlap, so make sure to find the one that corresponds
+	// to this file
+	do {
+		fbmm_file = mt_prev(&old_proc->files_mt, search_start, 0);
+		if (!fbmm_file || fbmm_file->va_end <= start) {
+			pr_err("fbmm_add_cow_file: Could not find fbmm_file\n");
+			return;
+		}
+		search_start = fbmm_file->va_start;
+	} while (fbmm_file->f != file);
+
+	cow_entry = kmalloc(sizeof(struct fbmm_cow_list_entry), GFP_KERNEL);
+	if (!cow_entry) {
+		pr_err("fbmm_add_cow_file: Could not allocate cow_entry!\n");
+		return;
+	}
+
+	get_fbmm_file(fbmm_file);
+	cow_entry->file = fbmm_file;
+
+	list_add(&cow_entry->node, &new_proc->cow_files);
+}
 ///////////////////////////////////////////////////////////////////////////////
 // MFS Helper Functions
 
@@ -763,7 +839,7 @@ static ssize_t fbmm_mnt_dir_read(struct file *file, char __user *ubuf,
 	}
 
 	// See if the selected task has an entry in the maple tree
-	proc = mtree_load(&fbmm_proc_mt, task->tgid);
+	proc = task->fbmm_proc;
 	if (proc)
 		len = sprintf(buffer, "%s\n", proc->mnt_dir_str);
 	else
@@ -818,11 +894,13 @@ static ssize_t fbmm_mnt_dir_write(struct file *file, const char __user *ubuf,
 		clear_entry = false;
 
 	if (!clear_entry) {
-		proc = mtree_load(&fbmm_proc_mt, task->tgid);
+		proc = task->fbmm_proc;
 
 		if (!proc) {
-			proc = fbmm_create_new_proc(buffer, task->tgid);
-			ret = mtree_store(&fbmm_proc_mt, task->tgid, proc, GFP_KERNEL);
+			proc = fbmm_create_new_proc(buffer);
+			task->fbmm_proc = proc;
+			if (!proc)
+				ret = -ENOMEM;
 		} else {
 			proc->mnt_dir_str = buffer;
 			ret = kern_path(buffer, LOOKUP_DIRECTORY | LOOKUP_FOLLOW, &proc->mnt_dir_path);
@@ -833,7 +911,7 @@ static ssize_t fbmm_mnt_dir_write(struct file *file, const char __user *ubuf,
 		kfree(buffer);
 
 		// If the previous entry stored a value, free it
-		proc = mtree_erase(&fbmm_proc_mt, task->tgid);
+		proc = task->fbmm_proc;
 		if (proc)
 			fbmm_put_proc(proc);
 	}

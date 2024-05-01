@@ -2253,6 +2253,7 @@ struct super_operations {
 				  struct shrink_control *);
 	long (*free_cached_objects)(struct super_block *,
 				    struct shrink_control *);
+	int (*copy_page_range)(struct vm_area_struct *dst, struct vm_area_struct *src);
 };
 
 /*

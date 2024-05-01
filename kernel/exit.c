@@ -850,11 +850,7 @@ void __noreturn do_exit(long code)
 		}
 	}
 
-
-	// Bijan: When a process exits, check if we should delete its FOM files
-	// We only care if the main thread exits, so check against tsk->pid
-	// instead of tsk->tgid
-	fbmm_check_exiting_proc(tsk->pid);
+	fbmm_exit(tsk);
 
 	kcov_task_exit(tsk);
 	kmsan_task_exit(tsk);
