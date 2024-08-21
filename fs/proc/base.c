@@ -97,6 +97,7 @@
 #include <linux/resctrl.h>
 #include <linux/cn_proc.h>
 #include <linux/ksm.h>
+#include <linux/file_based_mm.h>
 #include <uapi/linux/lsm.h>
 #include <trace/events/oom.h>
 #include "internal.h"
@@ -3358,6 +3359,9 @@ static const struct pid_entry tgid_base_stuff[] = {
 #ifdef CONFIG_KSM
 	ONE("ksm_merging_pages",  S_IRUSR, proc_pid_ksm_merging_pages),
 	ONE("ksm_stat",  S_IRUSR, proc_pid_ksm_stat),
+#endif
+#ifdef CONFIG_FILE_BASED_MM
+	REG("fbmm_mnt_dir", S_IRUGO|S_IWUSR, proc_fbmm_mnt_dir),
 #endif
 };
 

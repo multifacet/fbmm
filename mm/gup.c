@@ -22,6 +22,7 @@
 
 #include <asm/mmu_context.h>
 #include <asm/tlbflush.h>
+#include <linux/file_based_mm.h>
 
 #include "internal.h"
 

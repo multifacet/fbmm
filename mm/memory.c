@@ -5685,6 +5685,8 @@ vm_fault_t handle_mm_fault(struct vm_area_struct *vma, unsigned long address,
 
 	if (unlikely(is_vm_hugetlb_page(vma)))
 		ret = hugetlb_fault(vma->vm_mm, vma, address, flags);
+	else if (unlikely(is_vm_fbmm_page(vma)))
+		ret = fbmm_fault(vma, address, flags);
 	else
 		ret = __handle_mm_fault(vma, address, flags);
 
