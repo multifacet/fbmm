@@ -70,6 +70,7 @@
 #include <linux/sysfs.h>
 #include <linux/user_events.h>
 #include <linux/uaccess.h>
+#include <linux/file_based_mm.h>
 
 #include <uapi/linux/wait.h>
 
@@ -823,6 +824,8 @@ void __noreturn do_exit(long code)
 	synchronize_group_exit(tsk, code);
 
 	WARN_ON(tsk->plug);
+
+	fbmm_exit(tsk);
 
 	kcov_task_exit(tsk);
 	kmsan_task_exit(tsk);

@@ -2369,6 +2369,9 @@ __latent_entropy struct task_struct *copy_process(
 		goto bad_fork_cleanup_perf;
 	/* copy all the process information */
 	shm_init_task(p);
+	retval = fbmm_copy(current, p, clone_flags);
+	if (retval)
+		goto bad_fork_cleanup_audit;
 	retval = security_task_alloc(p, clone_flags);
 	if (retval)
 		goto bad_fork_cleanup_audit;

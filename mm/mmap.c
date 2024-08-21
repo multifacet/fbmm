@@ -182,6 +182,7 @@ SYSCALL_DEFINE1(brk, unsigned long, brk)
 	struct vm_area_struct *brkvma, *next = NULL;
 	unsigned long min_brk;
 	bool populate = false;
+	bool used_fbmm = false;
 	LIST_HEAD(uf);
 	struct vma_iterator vmi;
 
@@ -256,8 +257,23 @@ SYSCALL_DEFINE1(brk, unsigned long, brk)
 
 	brkvma = vma_prev_limit(&vmi, mm->start_brk);
 	/* Ok, looks good - let it rip. */
-	if (do_brk_flags(&vmi, brkvma, oldbrk, newbrk - oldbrk, 0) < 0)
-		goto out;
+	if (use_file_based_mm(current)) {
+		vm_flags_t vm_flags;
+		unsigned long prot = PROT_READ | PROT_WRITE;
+		unsigned long pgoff = 0;
+		struct file *f = fbmm_get_file(current, oldbrk, newbrk-oldbrk, prot, 0, false,
+			&pgoff);
+
+		if (f && !IS_ERR(f)) {
+			vm_flags = VM_DATA_DEFAULT_FLAGS | VM_ACCOUNT | mm->def_flags | VM_FBMM;
+			mmap_region(f, oldbrk, newbrk-oldbrk, vm_flags, pgoff, NULL);
+			used_fbmm = true;
+		}
+	}
+	if (!used_fbmm) {
+		if (do_brk_flags(&vmi, brkvma, oldbrk, newbrk - oldbrk, 0) < 0)
+			goto out;
+	}
 
 	mm->brk = brk;
 	if (mm->def_flags & VM_LOCKED)
@@ -1219,6 +1235,7 @@ unsigned long do_mmap(struct file *file, unsigned long addr,
 {
 	struct mm_struct *mm = current->mm;
 	int pkey = 0;
+	bool used_fbmm = false;
 
 	*populate = 0;
 
@@ -1278,10 +1295,30 @@ unsigned long do_mmap(struct file *file, unsigned long addr,
 	vm_flags |= calc_vm_prot_bits(prot, pkey) | calc_vm_flag_bits(flags) |
 			mm->def_flags | VM_MAYREAD | VM_MAYWRITE | VM_MAYEXEC;
 
+	/* Do we want to use FBMM? */
+	if (!file && (flags & MAP_ANONYMOUS) && use_file_based_mm(current)) {
+		addr = fbmm_get_unmapped_area(addr, len, pgoff, flags);
+
+		if (!IS_ERR_VALUE(addr)) {
+			bool topdown = test_bit(MMF_TOPDOWN, &mm->flags);
+
+			file = fbmm_get_file(current, addr, len, prot, flags, topdown, &pgoff);
+
+			if (file && !IS_ERR(file)) {
+				used_fbmm = true;
+				flags = flags & ~MAP_ANONYMOUS;
+				vm_flags |= VM_FBMM;
+			} else {
+				file = NULL;
+			}
+		}
+	}
+
 	/* Obtain the address to map to. we verify (or select) it and ensure
 	 * that it represents a valid section of the address space.
 	 */
-	addr = __get_unmapped_area(file, addr, len, pgoff, flags, vm_flags);
+	if (!used_fbmm)
+		addr = __get_unmapped_area(file, addr, len, pgoff, flags, vm_flags);
 	if (IS_ERR_VALUE(addr))
 		return addr;
 
@@ -2690,6 +2727,7 @@ do_vmi_align_munmap(struct vma_iterator *vmi, struct vm_area_struct *vma,
 		mmap_read_unlock(mm);
 
 	__mt_destroy(&mt_detach);
+	fbmm_munmap(current, start, end - start);
 	return 0;
 
 clear_tree_failed:
