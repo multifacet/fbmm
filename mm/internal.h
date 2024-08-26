@@ -1515,4 +1515,17 @@ static inline void shrinker_debugfs_remove(struct dentry *debugfs_entry,
 void workingset_update_node(struct xa_node *node);
 extern struct list_lru shadow_nodes;
 
+/* possible outcome of pageout() */
+typedef enum {
+	/* failed to write folio out, folio is locked */
+	PAGE_KEEP,
+	/* move folio to the active list, folio is locked */
+	PAGE_ACTIVATE,
+	/* folio has been sent to the disk successfully, folio is unlocked */
+	PAGE_SUCCESS,
+	/* folio is clean and locked */
+	PAGE_CLEAN,
+} pageout_t;
+pageout_t pageout(struct folio *folio, struct address_space *mapping,
+			 struct swap_iocb **plug);
 #endif	/* __MM_INTERNAL_H */

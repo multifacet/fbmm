@@ -591,23 +591,11 @@ void __acct_reclaim_writeback(pg_data_t *pgdat, struct folio *folio,
 		wake_up(&pgdat->reclaim_wait[VMSCAN_THROTTLE_WRITEBACK]);
 }
 
-/* possible outcome of pageout() */
-typedef enum {
-	/* failed to write folio out, folio is locked */
-	PAGE_KEEP,
-	/* move folio to the active list, folio is locked */
-	PAGE_ACTIVATE,
-	/* folio has been sent to the disk successfully, folio is unlocked */
-	PAGE_SUCCESS,
-	/* folio is clean and locked */
-	PAGE_CLEAN,
-} pageout_t;
-
 /*
  * pageout is called by shrink_folio_list() for each dirty folio.
  * Calls ->writepage().
  */
-static pageout_t pageout(struct folio *folio, struct address_space *mapping,
+pageout_t pageout(struct folio *folio, struct address_space *mapping,
 			 struct swap_iocb **plug)
 {
 	/*

@@ -68,6 +68,7 @@
 #include <linux/user_events.h>
 #include <linux/rseq.h>
 #include <linux/ksm.h>
+#include <linux/file_based_mm.h>
 
 #include <linux/uaccess.h>
 #include <asm/mmu_context.h>
@@ -1900,6 +1901,7 @@ static int bprm_execve(struct linux_binprm *bprm)
 	user_events_execve(current);
 	acct_update_integrals(current);
 	task_numa_free(current, false);
+	fbmm_clear_cow_files(current);
 	return retval;
 
 out:
