@@ -30,6 +30,12 @@ struct fbmm_file {
 	unsigned long va_start;
 	/* The ending virtual address assigned to this file (exclusive) */
 	unsigned long va_end;
+	atomic_t refcount;
+};
+
+struct fbmm_cow_list_entry {
+	struct list_head node;
+	struct fbmm_file *file;
 };
 
 static enum file_based_mm_state fbmm_state = FBMM_OFF;
@@ -52,6 +58,7 @@ static struct fbmm_info *fbmm_create_new_info(char *mnt_dir_str)
 	if (IS_ERR(info->get_unmapped_area_file))
 		return NULL;
 	mt_init(&info->files_mt);
+	INIT_LIST_HEAD(&info->cow_files);
 
 	return info;
 }
@@ -62,6 +69,11 @@ static void drop_fbmm_file(struct fbmm_file *file)
 		fput(file->f);
 		kfree(file);
 	}
+}
+
+static void get_fbmm_file(struct fbmm_file *file)
+{
+	atomic_inc(&file->refcount);
 }
 
 static pmdval_t fbmm_alloc_pmd(struct vm_fault *vmf)
@@ -202,6 +214,7 @@ struct file *fbmm_get_file(struct task_struct *tsk, unsigned long addr, unsigned
 		return NULL;
 	}
 	fbmm_file->f = f;
+	atomic_set(&fbmm_file->refcount, 1);
 	if (topdown) {
 		/*
 		 * Since VAs in this region grow down, this mapping will be the
@@ -290,9 +303,18 @@ int fbmm_munmap(struct task_struct *tsk, unsigned long start, unsigned long len)
 
 		falloc_len = falloc_end_offset - falloc_start_offset;
 
-		ret = vfs_fallocate(fbmm_file->f,
-				FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE,
-				falloc_start_offset, falloc_len);
+		/*
+		 * Because shared mappings via fork are hard, only punch a hole if there
+		 * is only one proc using this file.
+		 * It would be nice to be able to free the memory if all procs sharing
+		 * the file have unmapped it, but that would require tracking usage at
+		 * a page granularity.
+		 */
+		if (atomic_read(&fbmm_file->refcount) == 1) {
+			ret = vfs_fallocate(fbmm_file->f,
+					FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE,
+					falloc_start_offset, falloc_len);
+		}
 
 		fbmm_file = mt_next(&info->files_mt, fbmm_file->va_start, ULONG_MAX);
 		if (!fbmm_file || fbmm_file->va_end <= start)
@@ -321,6 +343,8 @@ void fbmm_exit(struct task_struct *tsk)
 	}
 	mtree_destroy(&info->files_mt);
 
+	fbmm_clear_cow_files(tsk);
+
 	if (info->mnt_dir_str) {
 		path_put(&info->mnt_dir_path);
 		fput(info->get_unmapped_area_file);
@@ -332,6 +356,7 @@ void fbmm_exit(struct task_struct *tsk)
 int fbmm_copy(struct task_struct *src_tsk, struct task_struct *dst_tsk, u64 clone_flags)
 {
 	struct fbmm_info *info;
+	struct fbmm_cow_list_entry *src_cow, *dst_cow;
 	char *buffer;
 	char *src_dir;
 
@@ -359,7 +384,78 @@ int fbmm_copy(struct task_struct *src_tsk, struct task_struct *dst_tsk, u64 clon
 	if (!dst_tsk->fbmm_info)
 		return -ENOMEM;
 
+	/*
+	 * If the source has CoW files, they may also be CoW files in the destination
+	 * so we need to copy that too
+	 */
+	list_for_each_entry(src_cow, &info->cow_files, node) {
+		dst_cow = kmalloc(sizeof(struct fbmm_cow_list_entry), GFP_KERNEL);
+		if (!dst_cow)
+			return -ENOMEM;
+
+		get_fbmm_file(src_cow->file);
+		dst_cow->file = src_cow->file;
+
+		list_add(&dst_cow->node, &dst_tsk->fbmm_info->cow_files);
+	}
+
 	return 0;
+}
+
+int fbmm_add_cow_file(struct task_struct *new_tsk, struct task_struct *old_tsk,
+		struct file *file, unsigned long start)
+{
+	struct fbmm_info *new_info;
+	struct fbmm_info *old_info;
+	struct fbmm_file *fbmm_file;
+	struct fbmm_cow_list_entry *cow_entry;
+	unsigned long search_start = start + 1;
+
+	new_info = new_tsk->fbmm_info;
+	old_info = old_tsk->fbmm_info;
+	if (!new_info || !old_info)
+		return -EINVAL;
+
+	/*
+	 * Find the fbmm_file that corresponds with the struct file.
+	 * fbmm files can overlap, so make sure to find the one that corresponds
+	 * to this file
+	 */
+	do {
+		fbmm_file = mt_prev(&old_info->files_mt, search_start, 0);
+		if (!fbmm_file || fbmm_file->va_end <= start) {
+			/* Could not find the corressponding fbmm file */
+			return -ENOMEM;
+		}
+		search_start = fbmm_file->va_start;
+	} while (fbmm_file->f != file);
+
+	cow_entry = kmalloc(sizeof(struct fbmm_cow_list_entry), GFP_KERNEL);
+	if (!cow_entry)
+		return -ENOMEM;
+
+	get_fbmm_file(fbmm_file);
+	cow_entry->file = fbmm_file;
+
+	list_add(&cow_entry->node, &new_info->cow_files);
+	return 0;
+}
+
+void fbmm_clear_cow_files(struct task_struct *tsk)
+{
+	struct fbmm_info *info;
+	struct fbmm_cow_list_entry *cow_entry, *tmp;
+
+	info = tsk->fbmm_info;
+	if (!info)
+		return;
+
+	list_for_each_entry_safe(cow_entry, tmp, &info->cow_files, node) {
+		list_del(&cow_entry->node);
+
+		drop_fbmm_file(cow_entry->file);
+		kfree(cow_entry);
+	}
 }
 
 static ssize_t fbmm_state_show(struct kobject *kobj,

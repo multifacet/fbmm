@@ -13,6 +13,7 @@ struct fbmm_info {
 	/* This file exists just to be passed to get_unmapped_area in mmap */
 	struct file *get_unmapped_area_file;
 	struct maple_tree files_mt;
+	struct list_head cow_files;
 };
 
 
@@ -31,6 +32,16 @@ void fbmm_populate_file(unsigned long start, unsigned long len);
 int fbmm_munmap(struct task_struct *tsk, unsigned long start, unsigned long len);
 void fbmm_exit(struct task_struct *tsk);
 int fbmm_copy(struct task_struct *src_tsk, struct task_struct *dst_tsk, u64 clone_flags);
+int fbmm_add_cow_file(struct task_struct *new_tsk, struct task_struct *old_tsk,
+	struct file *file, unsigned long start);
+void fbmm_clear_cow_files(struct task_struct *tsk);
+
+/* FBMM helper functions for MFSs */
+int fbmm_swapout_folio(struct folio *folio);
+int fbmm_writepage(struct page *page, struct writeback_control *wbc);
+struct page *fbmm_read_swap_entry(struct vm_fault *vmf, swp_entry_t entry, unsigned long pgoff,
+	struct page *page);
+int fbmm_copy_page_range(struct vm_area_struct *dst, struct vm_area_struct *src);
 
 #else /* CONFIG_FILE_BASED_MM */
 
@@ -76,6 +87,13 @@ static inline int fbmm_copy(struct task_struct *src_tsk, struct task_struct *dst
 {
 	return 0;
 }
+
+static inline int fbmm_add_cow_file(struct task_struct *new_tsk, struct task_struct *old_tsk,
+	struct file *file, unsigned long start) {
+	return 0;
+}
+
+static inline void fbmm_clear_cow_files(struct task_struct *tsk) {}
 #endif /* CONFIG_FILE_BASED_MM */
 
 #endif /* __FILE_BASED_MM_H */

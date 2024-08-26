@@ -625,8 +625,8 @@ static void dup_mm_exe_file(struct mm_struct *mm, struct mm_struct *oldmm)
 }
 
 #ifdef CONFIG_MMU
-static __latent_entropy int dup_mmap(struct mm_struct *mm,
-					struct mm_struct *oldmm)
+static __latent_entropy int dup_mmap(struct task_struct *tsk,
+					struct mm_struct *mm, struct mm_struct *oldmm)
 {
 	struct vm_area_struct *mpnt, *tmp;
 	int retval;
@@ -732,7 +732,45 @@ static __latent_entropy int dup_mmap(struct mm_struct *mm,
 			tmp->vm_ops->open(tmp);
 
 		file = tmp->vm_file;
-		if (file) {
+		if (file && use_file_based_mm(tsk) &&
+				(tmp->vm_flags & (VM_SHARED | VM_FBMM)) == VM_FBMM) {
+			/*
+			 * If this is a private FBMM file, we need to create a new
+			 * file for this allocation
+			 */
+			bool topdown = test_bit(MMF_TOPDOWN, &mm->flags);
+			unsigned long len = tmp->vm_end - tmp->vm_start;
+			unsigned long prot = 0;
+			unsigned long pgoff;
+			struct file *orig_file = file;
+
+			if (tmp->vm_flags & VM_READ)
+				prot |= PROT_READ;
+			if (tmp->vm_flags & VM_WRITE)
+				prot |= PROT_WRITE;
+			if (tmp->vm_flags & VM_EXEC)
+				prot |= PROT_EXEC;
+
+			/*
+			 * topdown may be incorrect if it is true but this is for a region created
+			 * by brk, which grows up, but if it's wrong, it'll only affect the next
+			 * brk allocation
+			 */
+			file = fbmm_get_file(tsk, tmp->vm_start, len, prot, 0, topdown, &pgoff);
+			if (!file) {
+				retval = -ENOMEM;
+				goto loop_out;
+			}
+
+			tmp->vm_pgoff = pgoff;
+			tmp->vm_file = get_file(file);
+			call_mmap(file, tmp);
+
+			retval = fbmm_add_cow_file(tsk, current, orig_file, tmp->vm_start);
+			if (retval) {
+				goto loop_out;
+			}
+		} else if (file) {
 			struct address_space *mapping = file->f_mapping;
 
 			get_file(file);
@@ -747,8 +785,12 @@ static __latent_entropy int dup_mmap(struct mm_struct *mm,
 			i_mmap_unlock_write(mapping);
 		}
 
-		if (!(tmp->vm_flags & VM_WIPEONFORK))
-			retval = copy_page_range(tmp, mpnt);
+		if (!(tmp->vm_flags & VM_WIPEONFORK)) {
+			if (file && file->f_inode->i_sb->s_op->copy_page_range)
+				retval = file->f_inode->i_sb->s_op->copy_page_range(tmp, mpnt);
+			else
+				retval = copy_page_range(tmp, mpnt);
+		}
 
 		if (retval) {
 			mpnt = vma_next(&vmi);
@@ -1685,7 +1727,7 @@ static struct mm_struct *dup_mm(struct task_struct *tsk,
 	if (!mm_init(mm, tsk, mm->user_ns))
 		goto fail_nomem;
 
-	err = dup_mmap(mm, oldmm);
+	err = dup_mmap(tsk, mm, oldmm);
 	if (err)
 		goto free_pt;
 
