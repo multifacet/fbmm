@@ -1036,6 +1036,7 @@ void flush_tlb_mm_range(struct mm_struct *mm, unsigned long start,
 	put_cpu();
 	mmu_notifier_arch_invalidate_secondary_tlbs(mm, start, end);
 }
+EXPORT_SYMBOL_GPL(flush_tlb_mm_range);
 
 
 static void do_flush_tlb_all(void *info)

@@ -1782,6 +1782,7 @@ generic_get_unmapped_area(struct file *filp, unsigned long addr,
 	info.high_limit = mmap_end;
 	return vm_unmapped_area(&info);
 }
+EXPORT_SYMBOL_GPL(generic_get_unmapped_area);
 
 #ifndef HAVE_ARCH_UNMAPPED_AREA
 unsigned long
@@ -1846,6 +1847,7 @@ generic_get_unmapped_area_topdown(struct file *filp, unsigned long addr,
 
 	return addr;
 }
+EXPORT_SYMBOL_GPL(generic_get_unmapped_area_topdown);
 
 #ifndef HAVE_ARCH_UNMAPPED_AREA_TOPDOWN
 unsigned long

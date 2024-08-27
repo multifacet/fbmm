@@ -1468,6 +1468,7 @@ void folio_add_file_rmap_ptes(struct folio *folio, struct page *page,
 {
 	__folio_add_file_rmap(folio, page, nr_pages, vma, RMAP_LEVEL_PTE);
 }
+EXPORT_SYMBOL_GPL(folio_add_file_rmap_ptes);
 
 /**
  * folio_add_file_rmap_pmd - add a PMD mapping to a page range of a folio
@@ -1594,6 +1595,7 @@ void folio_remove_rmap_ptes(struct folio *folio, struct page *page,
 {
 	__folio_remove_rmap(folio, page, nr_pages, vma, RMAP_LEVEL_PTE);
 }
+EXPORT_SYMBOL_GPL(folio_remove_rmap_ptes);
 
 /**
  * folio_remove_rmap_pmd - remove a PMD mapping from a page range of a folio
