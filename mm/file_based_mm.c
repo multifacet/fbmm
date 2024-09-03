@@ -860,7 +860,6 @@ static ssize_t fbmm_mnt_dir_write(struct file *file, const char __user *ubuf,
 	struct path p;
 	char *buffer;
 	struct fbmm_proc *proc;
-	bool clear_entry = true;
 	int ret = 0;
 
 	if (count > PATH_MAX) {
@@ -890,10 +889,8 @@ static ssize_t fbmm_mnt_dir_write(struct file *file, const char __user *ubuf,
 
 	// Check if the given path is actually a valid directory
 	ret = kern_path(buffer, LOOKUP_DIRECTORY | LOOKUP_FOLLOW, &p);
-	if (!ret)
-		clear_entry = false;
-
-	if (!clear_entry) {
+	if (!ret) {
+		path_put(&p);
 		proc = task->fbmm_proc;
 
 		if (!proc) {
