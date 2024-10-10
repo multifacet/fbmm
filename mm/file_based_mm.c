@@ -224,7 +224,7 @@ struct file *fbmm_get_file(struct task_struct *tsk, unsigned long addr, unsigned
 	} else if (prot & PROT_WRITE) {
 		open_flags |= O_WRONLY;
 		open_mode |= S_IWUSR;
-	} else if (prot & PROT_READ) {
+	} else {
 		// It doesn't make sense for anon memory to be read only,
 		return NULL;
 	}
