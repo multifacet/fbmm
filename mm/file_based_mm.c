@@ -399,6 +399,9 @@ void fbmm_exit(struct task_struct *tsk) {
 	struct fbmm_cow_list_entry *cow_entry, *tmp;
 	unsigned long index = 0;
 
+	if (tsk->tgid != tsk->pid)
+		return;
+
 	proc = tsk->fbmm_proc;
 	if (!proc)
 		return;

@@ -2161,7 +2161,7 @@ static __latent_entropy struct task_struct *copy_process(
 	if (clone_flags & CLONE_THREAD) {
 		// If the new task is just a thread, not a new proc, just copy fbmm info
 		p->fbmm_proc = current->fbmm_proc;
-	} if (use_file_based_mm(current)) {
+	} else if (use_file_based_mm(current)) {
 		// Copy the default fbmm mount dir on fork
 		if (fbmm_copy(current, p)) {
 			pr_err("Failed to copy fbmm mnt dir from %d to %d\n", current->tgid, p->tgid);
