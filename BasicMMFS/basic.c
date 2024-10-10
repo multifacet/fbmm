@@ -248,8 +248,6 @@ static vm_fault_t basicmmfs_fault(struct vm_fault *vmf)
             kunmap(page);
             kunmap(old_page);
 
-            // The old page is unmapped, so we can drop the reference
-            page_remove_rmap(old_page, vma, false);
         } else {
             basicmmfs_return_page(page, sbi);
             page = old_page;
@@ -259,6 +257,17 @@ static vm_fault_t basicmmfs_fault(struct vm_fault *vmf)
         put_page(old_page);
         // Decrease the filepage count for the same reason
         percpu_counter_dec(&vma->vm_mm->rss_stat[MM_FILEPAGES]);
+        page_remove_rmap(old_page, vma, false);
+
+        /**
+         * If we are copying a page for the process that originally faulted the
+         * page, we have to replace the mapping
+         */
+        if (mapping == page_folio(old_page)->mapping) {
+            if (old_page != page)
+                replace_page_cache_folio(page_folio(old_page), page_folio(page));
+            new_page = false;
+        }
 
         unlock_page(old_page);
     }
