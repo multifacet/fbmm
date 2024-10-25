@@ -205,14 +205,14 @@ static long tieredmmfs_free_range(struct inode *inode, loff_t offset, loff_t len
     struct tieredmmfs_inode_info *inode_info = FTFS_I(inode);
     struct rb_node *node, *next_node;
     struct tieredmmfs_page *page = NULL;
-    u64 cur_offset = offset;
     u64 page_offset = offset >> sbi->page_shift;
+    u64 cur_offset = page_offset;
     u64 num_pages = len >> sbi->page_shift;
 
     write_lock(&inode_info->map_lock);
-    while (!page && cur_offset < offset + len) {
+    while (!page && cur_offset < page_offset + num_pages) {
         page = tieredmmfs_find_page(&inode_info->page_maps, cur_offset);
-        cur_offset += sbi->page_size;
+        cur_offset++;
     }
     if (!page) {
         goto unlock;
