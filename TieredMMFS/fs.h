@@ -66,6 +66,7 @@ struct tieredmmfs_sb_info {
 struct tieredmmfs_inode_info {
     struct rb_root page_maps; // Mapping of offset page to dax page
     rwlock_t map_lock;
+    struct address_space *mapping;
 };
 
 struct tieredmmfs_context_info {

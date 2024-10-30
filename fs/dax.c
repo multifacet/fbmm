@@ -799,6 +799,7 @@ int dax_delete_mapping_entry(struct address_space *mapping, pgoff_t index)
 	WARN_ON_ONCE(!ret);
 	return ret;
 }
+EXPORT_SYMBOL_GPL(dax_delete_mapping_entry);
 
 /*
  * Invalidate DAX entry if it is clean.
