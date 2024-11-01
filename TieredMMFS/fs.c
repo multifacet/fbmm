@@ -227,8 +227,8 @@ static long tieredmmfs_free_range(struct inode *inode, loff_t offset, loff_t len
         // which have higher priority than inode_info->map_lock, so we have to give it up
         write_unlock(&inode_info->map_lock);
 
-        tieredmmfs_return_page(sbi, page);
         dax_delete_mapping_entry(inode_info->mapping, page->page_offset << (sbi->page_shift - PAGE_SHIFT));
+        tieredmmfs_return_page(sbi, page);
 
         if (!next_node)
             break;
