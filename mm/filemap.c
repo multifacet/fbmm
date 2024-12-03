@@ -260,6 +260,7 @@ void filemap_remove_folio(struct folio *folio)
 
 	filemap_free_folio(mapping, folio);
 }
+EXPORT_SYMBOL_GPL(filemap_remove_folio);
 
 /*
  * page_cache_delete_batch - delete several folios from page cache

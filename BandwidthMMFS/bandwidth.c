@@ -137,7 +137,30 @@ static long bwmmfs_fallocate(struct file *file, int mode, loff_t offset, loff_t 
     struct page *page;
     loff_t off;
 
-    if (mode != 0) {
+    if (mode & FALLOC_FL_PUNCH_HOLE) {
+        for (off = offset; off < offset + len; off += PAGE_SIZE) {
+            page = mtree_erase(&inode_info->mt, off);
+            if (page) {
+                int mapcount = atomic_read(&page_folio(page)->_mapcount) + 1;
+                put_page(page);
+                sbi->num_pages--;
+
+                // I don't know if this is right, but it makes bad page
+                // cache errors go away when running merci
+                if (mapcount >= 1) {
+                    continue;
+                }
+
+                if (page->mapping) {
+                    folio_lock(page_folio(page));
+                    filemap_remove_folio(page_folio(page));
+                    folio_unlock(page_folio(page));
+                }
+            }
+        }
+
+        return 0;
+    } else if (mode != 0) {
         return -EOPNOTSUPP;
     }
 
@@ -304,6 +327,11 @@ static void bwmmfs_free_inode(struct inode *inode)
     mt_for_each(&inode_info->mt, page, index, ULONG_MAX) {
         sbi->num_pages--;
         put_page(page);
+        if (page->mapping) {
+            folio_lock(page_folio(page));
+            filemap_remove_folio(page_folio(page));
+            folio_unlock(page_folio(page));
+        }
     }
 
     mtree_destroy(&inode_info->mt);

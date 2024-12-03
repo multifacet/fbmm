@@ -2487,6 +2487,7 @@ do_mas_align_munmap(struct ma_state *mas, struct vm_area_struct *vma,
 	__mt_destroy(&mt_detach);
 
 	validate_mm(mm);
+	fbmm_munmap(current, start, end - start);
 	return downgrade ? 1 : 0;
 
 userfaultfd_error:
@@ -2537,7 +2538,6 @@ int do_mas_munmap(struct ma_state *mas, struct mm_struct *mm,
 	if (!vma)
 		return 0;
 
-	fbmm_munmap(current, start, end - start);
 	return do_mas_align_munmap(mas, vma, mm, start, end, uf, downgrade);
 }
 
