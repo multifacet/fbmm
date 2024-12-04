@@ -24,6 +24,8 @@ struct bwmmfs_sb_info {
 
 struct bwmmfs_inode_info {
     atomic_t alloc_count;
+    spinlock_t mt_lock;
+    struct address_space *mapping;
     struct maple_tree mt;
 };
 #endif //CONTIG_MMFS_H

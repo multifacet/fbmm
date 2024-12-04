@@ -22,6 +22,7 @@ static const struct inode_operations bwmmfs_dir_inode_operations;
 static atomic_t mount_count = ATOMIC_INIT(0);
 static struct kobj_attribute node_weight_attr;
 
+static int bwmmfs_release(struct inode *inode, struct file *file);
 struct bwmmfs_sb_info *BWMMFS_SB(struct super_block *sb)
 {
     return sb->s_fs_info;
@@ -84,19 +85,22 @@ static vm_fault_t bwmmfs_fault(struct vm_fault *vmf)
         goto unlock;
     }
 
+    spin_lock(&inode_info->mt_lock);
     page = mtree_load(&inode_info->mt, offset);
     if (!page) {
         page = bwmmfs_alloc_page(sbi, inode_info);
         if (!page) {
+            spin_unlock(&inode_info->mt_lock);
             pte_unmap_unlock(vmf->pte, vmf->ptl);
             return VM_FAULT_OOM;
         }
         sbi->num_pages++;
-        INIT_LIST_HEAD(&page->lru);
+        __filemap_add_folio(mapping, page_folio(page), pgoff, GFP_KERNEL, NULL);
+        //INIT_LIST_HEAD(&page->lru);
 
         mtree_store(&inode_info->mt, offset, page, GFP_KERNEL);
     }
-    __filemap_add_folio(mapping, page_folio(page), pgoff, GFP_KERNEL, NULL);
+    spin_unlock(&inode_info->mt_lock);
 
     // Construct the pte entry
     entry = mk_pte(page, vma->vm_page_prot);
@@ -123,8 +127,13 @@ static struct vm_operations_struct bwmmfs_vm_ops = {
 
 static int bwmmfs_mmap(struct file *file, struct vm_area_struct *vma)
 {
+    struct inode *inode = file_inode(file);
+    struct bwmmfs_inode_info *inode_info = BWMMFS_I(inode);
+
     file_accessed(file);
     vma->vm_ops = &bwmmfs_vm_ops;
+
+    inode_info->mapping = file->f_mapping;
 
     return 0;
 }
@@ -138,18 +147,20 @@ static long bwmmfs_fallocate(struct file *file, int mode, loff_t offset, loff_t 
     loff_t off;
 
     if (mode & FALLOC_FL_PUNCH_HOLE) {
+        spin_lock(&inode_info->mt_lock);
         for (off = offset; off < offset + len; off += PAGE_SIZE) {
             page = mtree_erase(&inode_info->mt, off);
             if (page) {
                 int mapcount = atomic_read(&page_folio(page)->_mapcount) + 1;
-                put_page(page);
-                sbi->num_pages--;
-
                 // I don't know if this is right, but it makes bad page
                 // cache errors go away when running merci
                 if (mapcount >= 1) {
+                    mtree_store(&inode_info->mt, off, page, GFP_KERNEL);
                     continue;
                 }
+
+                put_page(page);
+                sbi->num_pages--;
 
                 if (page->mapping) {
                     folio_lock(page_folio(page));
@@ -158,6 +169,7 @@ static long bwmmfs_fallocate(struct file *file, int mode, loff_t offset, loff_t 
                 }
             }
         }
+	spin_unlock(&inode_info->mt_lock);
 
         return 0;
     } else if (mode != 0) {
@@ -165,15 +177,21 @@ static long bwmmfs_fallocate(struct file *file, int mode, loff_t offset, loff_t 
     }
 
     // Allocate and add mappings for the desired range
+    spin_lock(&inode_info->mt_lock);
     for (off = offset; off < offset + len; off += PAGE_SIZE) {
         page = bwmmfs_alloc_page(sbi, inode_info);
         if (!page) {
+            spin_unlock(&inode_info->mt_lock);
             return -ENOMEM;
         }
 
         sbi->num_pages++;
+	__filemap_add_folio(inode_info->mapping, page_folio(page), off >> PAGE_SHIFT,
+	    GFP_KERNEL, NULL);
         mtree_store(&inode_info->mt, off, page, GFP_KERNEL);
+
     }
+    spin_unlock(&inode_info->mt_lock);
 
     return 0;
 }
@@ -187,6 +205,7 @@ const struct file_operations bwmmfs_file_operations = {
     .llseek = generic_file_llseek,
     .get_unmapped_area = generic_get_unmapped_area_topdown,
     .fallocate = bwmmfs_fallocate,
+    .release = bwmmfs_release,
 };
 
 const struct inode_operations bwmmfs_file_inode_operations = {
@@ -215,6 +234,7 @@ struct inode *bwmmfs_get_inode(struct super_block *sb,
     }
     mt_init(&info->mt);
     atomic_set(&info->alloc_count, 0);
+    spin_lock_init(&info->mt_lock);
 
     inode->i_ino = get_next_ino();
     inode_init_owner(&init_user_ns, inode, dir, mode);
@@ -316,7 +336,8 @@ static int bwmmfs_statfs(struct dentry *dentry, struct kstatfs *buf)
     return 0;
 }
 
-static void bwmmfs_free_inode(struct inode *inode)
+//static void bwmmfs_free_inode(struct inode *inode)
+static int bwmmfs_release(struct inode *inode, struct file *file)
 {
     struct bwmmfs_sb_info *sbi = BWMMFS_SB(inode->i_sb);
     struct bwmmfs_inode_info *inode_info = BWMMFS_I(inode);
@@ -336,6 +357,8 @@ static void bwmmfs_free_inode(struct inode *inode)
 
     mtree_destroy(&inode_info->mt);
     kfree(inode_info);
+
+    return 0;
 }
 
 static int bwmmfs_show_options(struct seq_file *m, struct dentry *root)
@@ -345,7 +368,7 @@ static int bwmmfs_show_options(struct seq_file *m, struct dentry *root)
 
 static const struct super_operations bwmmfs_ops = {
     .statfs = bwmmfs_statfs,
-    .free_inode = bwmmfs_free_inode,
+    //.free_inode = bwmmfs_free_inode,
     .drop_inode = generic_delete_inode,
     .show_options = bwmmfs_show_options,
 };
