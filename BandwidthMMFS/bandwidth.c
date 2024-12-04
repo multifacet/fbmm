@@ -93,10 +93,10 @@ static vm_fault_t bwmmfs_fault(struct vm_fault *vmf)
         }
         sbi->num_pages++;
         INIT_LIST_HEAD(&page->lru);
-        __filemap_add_folio(mapping, page_folio(page), pgoff, GFP_KERNEL, NULL);
 
         mtree_store(&inode_info->mt, offset, page, GFP_KERNEL);
     }
+    __filemap_add_folio(mapping, page_folio(page), pgoff, GFP_KERNEL, NULL);
 
     // Construct the pte entry
     entry = mk_pte(page, vma->vm_page_prot);
@@ -171,7 +171,7 @@ static long bwmmfs_fallocate(struct file *file, int mode, loff_t offset, loff_t 
             return -ENOMEM;
         }
 
-
+        sbi->num_pages++;
         mtree_store(&inode_info->mt, off, page, GFP_KERNEL);
     }
 
